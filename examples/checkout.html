@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pago con tarjeta — Mercado Pago Checkout API</title>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; margin-bottom: 4px; color: #555; }
+    /* Contenedores de iframes de MP */
+    #form-checkout__cardNumber,
+    #form-checkout__expirationDate,
+    #form-checkout__securityCode {
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      height: 48px;
+      box-sizing: border-box;
+      position: relative;
+    }
+    /* El iframe que inyecta MP */
+    #form-checkout__cardNumber iframe,
+    #form-checkout__expirationDate iframe,
+    #form-checkout__securityCode iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100% !important;
+      height: 100% !important;
+      border: none;
+      pointer-events: auto;
+    }
+    input, select { width: 100%; border: 1px solid #ccc; border-radius: 6px; height: 40px; padding: 0 8px; box-sizing: border-box; }
+    button { width: 100%; background: #009EE3; color: #fff; border: none; border-radius: 6px; height: 44px; font-size: 16px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #result { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; }
+    #result.approved { background: #d4edda; color: #155724; }
+    #result.rejected { background: #f8d7da; color: #721c24; }
+    #result.pending  { background: #fff3cd; color: #856404; }
+    #result.error    { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+
+  <h2>Pago con tarjeta</h2>
+
+  <form id="form-checkout">
+
+    <div class="form-group">
+      <label>Monto a pagar (MXN)</label>
+      <input type="number" id="payment-amount" placeholder="0.00" min="1" step="0.01" required />
+    </div>
+
+    <div class="form-group">
+      <label>Número de tarjeta</label>
+      <!-- MP monta un iframe seguro aquí -->
+      <div id="form-checkout__cardNumber"></div>
+    </div>
+
+    <div style="display:flex; gap:12px;">
+      <div class="form-group" style="flex:1">
+        <label>Vencimiento</label>
+        <div id="form-checkout__expirationDate"></div>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>CVV</label>
+        <div id="form-checkout__securityCode"></div>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Nombre en la tarjeta</label>
+      <input type="text" id="form-checkout__cardholderName" placeholder="Como aparece en la tarjeta" />
+    </div>
+
+    <div class="form-group">
+      <label>Email del comprador</label>
+      <input type="email" id="form-checkout__cardholderEmail" placeholder="correo@ejemplo.com" />
+    </div>
+
+    <div class="form-group">
+      <label>Banco emisor</label>
+      <select id="form-checkout__issuer"></select>
+    </div>
+
+    <!-- Identificación opcional en México — descomenta si la necesitas
+    <div style="display:flex; gap:12px;">
+      <div class="form-group" style="flex:1">
+        <label>Tipo de identificación</label>
+        <select id="form-checkout__identificationType"></select>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label>Número (RFC / CURP)</label>
+        <input type="text" id="form-checkout__identificationNumber" placeholder="XAXX010101000" />
+      </div>
+    </div>
+    -->
+
+    <!-- Requerido por MP aunque no se muestre — fijo en 1 (sin mensualidades) -->
+    <select id="form-checkout__installments" style="display:none;"></select>
+
+    <!-- Tu ID interno del usuario — normalmente viene del JWT/sesión, no del formulario -->
+    <input type="hidden" id="user-id" value="user-123" />
+
+    <button type="submit" id="form-checkout__submit">Pagar $150.00 MXN</button>
+  </form>
+
+  <div id="result"></div>
+
+  <!-- SDK de Mercado Pago v2 -->
+  <script src="https://sdk.mercadopago.com/js/v2"></script>
+  <script>
+    // Leer parámetros que Flutter pasa por URL
+    const params  = new URLSearchParams(window.location.search);
+    const userId  = params.get('user_id') || document.getElementById('user-id').value;
+    const extRef  = params.get('ref')     || ('orden-' + Date.now());
+
+    // Debug — verificar que los params llegan correctamente
+    console.log('URL completa:', window.location.href);
+    console.log('Params → user_id:', userId, '| ref:', extRef);
+
+    // Actualizar botón cuando el usuario escribe el monto
+    const amountInput = document.getElementById('payment-amount');
+    amountInput.addEventListener('input', () => {
+      const val = parseFloat(amountInput.value) || 0;
+      document.getElementById('form-checkout__submit').textContent =
+        val > 0 ? `Pagar $${val.toFixed(2)} MXN` : 'Pagar';
+    });
+
+    // 1. Inicializar con tu PUBLIC KEY
+    const mp = new MercadoPago('APP_USR-ff429938-4c7a-47c1-b882-674d04234f1e', { locale: 'es-MX' });
+    // 2. Montar el CardForm — MP inyecta iframes seguros en los divs declarados
+    const cardForm = mp.cardForm({
+      amount: amountInput.value || '1', // MP requiere un valor inicial, se sobreescribe al submit
+      iframe: true,
+      form: {
+        id: 'form-checkout',
+        cardNumber:         { id: 'form-checkout__cardNumber',         placeholder: '0000 0000 0000 0000' },
+        expirationDate:     { id: 'form-checkout__expirationDate',     placeholder: 'MM/YY' },
+        securityCode:       { id: 'form-checkout__securityCode',       placeholder: 'CVV' },
+        cardholderName:     { id: 'form-checkout__cardholderName' },
+        cardholderEmail:    { id: 'form-checkout__cardholderEmail' },
+        issuer:             { id: 'form-checkout__issuer' },
+        installments:       { id: 'form-checkout__installments' },
+      },
+      callbacks: {
+        onFormMounted: (error) => {
+          if (error) return console.error('CardForm mount error:', error);
+          console.log('✅ CardForm montado correctamente');
+        },
+        onReady: () => {
+          console.log('✅ CardForm listo para recibir datos');
+        },
+
+        // 3. Al hacer submit MP tokeniza la tarjeta y llama este callback
+        onSubmit: async (event) => {
+          event.preventDefault();
+          const btn = document.getElementById('form-checkout__submit');
+
+          // Validar monto antes de procesar
+          const inputAmount = parseFloat(document.getElementById('payment-amount').value);
+          if (!inputAmount || inputAmount <= 0) {
+            alert('Ingresa un monto válido');
+            return;
+          }
+
+          btn.disabled = true;
+          btn.textContent = 'Procesando...';
+
+          const {
+            token,
+            paymentMethodId: payment_method_id,
+            paymentMethodType: payment_method_type,
+            cardholderEmail: email,
+          } = cardForm.getCardFormData();
+
+          try {
+            const response = await fetch('http://localhost:3001/api/payments', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token,
+                transaction_amount: inputAmount,
+                payment_method_id,
+                payment_method_type,
+                description: 'Compra en Servia',
+                external_reference: extRef,
+                user_id: userId,
+                payer: { email },
+              }),
+            });
+
+            const data = await response.json();
+            mostrarResultado(data);
+          } catch (err) {
+            mostrarResultado({ status: 'error', error: err.message });
+          } finally {
+            btn.disabled = false;
+            btn.textContent = `Pagar $${inputAmount.toFixed(2)} MXN`;
+            // El token es de un solo uso — resetear el form para generar uno nuevo
+            cardForm.unmount();
+            cardForm.mount();
+          }
+        },
+
+        onFetching: (resource) => {
+          // Puedes mostrar un spinner mientras MP carga datos (ej: cuotas)
+          console.log('Fetching:', resource);
+        },
+      },
+    });
+
+    function mostrarResultado(data) {
+      const el = document.getElementById('result');
+      el.style.display = 'block';
+
+      const mensajes = {
+        processed:  '✅ Pago aprobado',
+        failed:     '❌ Pago rechazado: ' + (data.payment_status_detail ?? ''),
+        pending:    '⏳ Pago pendiente de acreditación',
+        in_process: '⏳ Pago en revisión',
+        error:      '⚠️ Error: ' + (data.error ?? data.message ?? 'Intenta de nuevo'),
+      };
+
+      el.className = data.status === 'processed' ? 'approved' : (data.status ?? 'error');
+      el.innerHTML = `
+        <strong>${mensajes[data.status] ?? 'Estado: ' + data.status}</strong>
+        ${data.order_id ? `<br><small>Orden: ${data.order_id}</small>` : ''}
+      `;
+
+      // Enviar resultado a Flutter vía JavaScript channel
+      if (window.FlutterChannel) {
+        window.FlutterChannel.postMessage(JSON.stringify({
+          order_id:             data.order_id,
+          payment_id:           data.payment_id,
+          status:               data.status,
+          payment_status:       data.payment_status,
+          payment_status_detail: data.payment_status_detail,
+          total_amount:         data.total_amount,
+          external_reference:   data.external_reference,
+          user_id:              data.user_id,
+        }));
+      }
+    }
+  </script>
+</body>
+</html>
