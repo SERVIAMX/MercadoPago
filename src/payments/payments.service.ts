@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -112,7 +112,7 @@ export class PaymentsService {
 
         await this.savePayment(result);
         await this.forwardToServiaAPI(result);
-        return result;
+        throw new HttpException(result, HttpStatus.BAD_REQUEST);
       }
 
       this.logger.error('Error al crear orden de pago — sin datos recuperables', error?.message ?? error);
