@@ -47,4 +47,7 @@ export class Payment {
 
   @UpdateDateColumn({ type: 'timestamp', name: 'FhActualizacion' })
   fhActualizacion: Date;
+
+  @Column({ type: 'bigint', unsigned: true, nullable: true, name: 'ClientId' })
+  clientId: number | null;
 }

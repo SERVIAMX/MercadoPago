@@ -30,6 +30,7 @@
       pointer-events: auto;
     }
     input, select { width: 100%; border: 1px solid #ccc; border-radius: 6px; height: 40px; padding: 0 8px; box-sizing: border-box; }
+    input:disabled { background: #f5f5f5; color: #333; cursor: not-allowed; font-weight: 600; }
     button { width: 100%; background: #009EE3; color: #fff; border: none; border-radius: 6px; height: 44px; font-size: 16px; cursor: pointer; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     #result { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; }
@@ -98,8 +99,8 @@
     <!-- Requerido por MP aunque no se muestre — fijo en 1 (sin mensualidades) -->
     <select id="form-checkout__installments" style="display:none;"></select>
 
-    <!-- Tu ID interno del usuario — normalmente viene del JWT/sesión, no del formulario -->
-    <input type="hidden" id="user-id" value="user-123" />
+    <!-- ID del cliente — normalmente viene del JWT/sesión, no del formulario -->
+    <input type="hidden" id="client-id" value="" />
 
     <button type="submit" id="form-checkout__submit">Pagar $150.00 MXN</button>
   </form>
@@ -110,21 +111,22 @@
   <script src="https://sdk.mercadopago.com/js/v2"></script>
   <script>
     // Leer parámetros que Flutter pasa por URL
-    const params  = new URLSearchParams(window.location.search);
-    const userId  = params.get('user_id') || document.getElementById('user-id').value;
-    const extRef  = params.get('ref')     || ('orden-' + Date.now());
+    const params   = new URLSearchParams(window.location.search);
+    const clientId = params.get('clientId') || document.getElementById('client-id').value;
+    const extRef   = params.get('ref')      || ('orden-' + Date.now());
+    const amount   = params.get('amount');
 
-    // Debug — verificar que los params llegan correctamente
     console.log('URL completa:', window.location.href);
-    console.log('Params → user_id:', userId, '| ref:', extRef);
+    console.log('Params → clientId:', clientId, '| ref:', extRef, '| amount:', amount);
 
-    // Actualizar botón cuando el usuario escribe el monto
+    // Setear monto desde URL — disabled para que no se pueda editar
     const amountInput = document.getElementById('payment-amount');
-    amountInput.addEventListener('input', () => {
-      const val = parseFloat(amountInput.value) || 0;
+    if (amount && parseFloat(amount) > 0) {
+      amountInput.value    = parseFloat(amount).toFixed(2);
+      amountInput.disabled = true;
       document.getElementById('form-checkout__submit').textContent =
-        val > 0 ? `Pagar $${val.toFixed(2)} MXN` : 'Pagar';
-    });
+        `Pagar $${parseFloat(amount).toFixed(2)} MXN`;
+    }
 
     // 1. Inicializar con tu PUBLIC KEY
     const mp = new MercadoPago('APP_USR-ff429938-4c7a-47c1-b882-674d04234f1e', { locale: 'es-MX' });
@@ -156,10 +158,10 @@
           event.preventDefault();
           const btn = document.getElementById('form-checkout__submit');
 
-          // Validar monto antes de procesar
+          // Tomar monto del input (viene de URL, no editable)
           const inputAmount = parseFloat(document.getElementById('payment-amount').value);
           if (!inputAmount || inputAmount <= 0) {
-            alert('Ingresa un monto válido');
+            alert('Monto inválido. Verifica la URL.');
             return;
           }
 
@@ -184,7 +186,7 @@
                 payment_method_type,
                 description: 'Compra en Servia',
                 external_reference: extRef,
-                user_id: userId,
+                client_id: clientId,
                 payer: { email },
               }),
             });

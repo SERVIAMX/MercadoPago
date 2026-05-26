@@ -79,10 +79,10 @@ export class CreatePaymentDto {
   external_reference?: string;
 
   @ApiPropertyOptional({
-    example: 'user-456',
-    description: 'Tu ID interno del usuario que está pagando',
+    example: '456',
+    description: 'ID interno del cliente que está pagando',
   })
   @IsOptional()
   @IsString()
-  user_id?: string;
+  client_id?: string;
 }

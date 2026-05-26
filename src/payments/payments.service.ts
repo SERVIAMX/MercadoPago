@@ -32,10 +32,10 @@ export class PaymentsService {
   async createPayment(dto: CreatePaymentDto) {
     const amount = dto.transaction_amount.toFixed(2);
 
-    // Codifica user_id + order reference — solo caracteres permitidos por MP (sin : ni |)
-    const ordRef = dto.external_reference ?? `${Date.now()}`;
-    const externalRef = dto.user_id
-      ? `u_${dto.user_id}__o_${ordRef}`
+    // Codifica clientId + order reference — solo caracteres permitidos por MP
+    const ordRef     = dto.external_reference ?? `${Date.now()}`;
+    const externalRef = dto.client_id
+      ? `c_${dto.client_id}__o_${ordRef}`
       : `o_${ordRef}`;
 
     try {
@@ -53,97 +53,68 @@ export class PaymentsService {
             }),
           },
           transactions: {
-            payments: [
-              {
-                amount,
-                payment_method: {
-                  id: dto.payment_method_id,
-                  type: dto.payment_method_type ?? 'credit_card',
-                  token: dto.token,
-                  installments: dto.installments ?? 1,
-                  statement_descriptor: 'SERVIA',
-                },
+            payments: [{
+              amount,
+              payment_method: {
+                id: dto.payment_method_id,
+                type: dto.payment_method_type ?? 'credit_card',
+                token: dto.token,
+                installments: dto.installments ?? 1,
+                statement_descriptor: 'SERVIA',
               },
-            ],
+            }],
           },
         },
         requestOptions: { idempotencyKey: uuidv4() },
       } as any);
 
       const firstPayment = (response as any).transactions?.payments?.[0];
-      const { userId } = this.parseExternalRef(externalRef);
+      const { clientId } = this.parseExternalRef(externalRef);
 
-      this.logger.log(
-        `Orden creada: ${response.id} | Estado: ${(response as any).status}`,
-      );
+      this.logger.log(`Orden creada: ${response.id} | Estado: ${(response as any).status}`);
 
       const result = {
-        order_id: response.id,
-        payment_id: firstPayment?.id,
-        status: (response as any).status,
-        payment_status: firstPayment?.status,
+        order_id:             response.id,
+        payment_id:           firstPayment?.id,
+        status:               (response as any).status,
+        payment_status:       firstPayment?.status,
         payment_status_detail: firstPayment?.status_detail,
-        total_amount: (response as any).total_amount,
-        external_reference: (response as any).external_reference,
-        date_created: (response as any).date_created,
-        user_id: userId ?? null,
+        total_amount:         (response as any).total_amount,
+        external_reference:   (response as any).external_reference,
+        date_created:         (response as any).date_created,
+        client_id:            clientId ?? null,
       };
 
-      // Guardar en BD y notificar a ServiaAPI
-      await this.savePayment({
-        orderId:             result.order_id,
-        paymentId:           result.payment_id,
-        status:              result.status,
-        paymentStatus:       result.payment_status,
-        paymentStatusDetail: result.payment_status_detail,
-        totalAmount:         result.total_amount,
-        externalReference:   result.external_reference,
-        userId:              result.user_id,
-      });
+      await this.savePayment(result);
       await this.forwardToServiaAPI(result);
-
       return result;
+
     } catch (error) {
-      // MP puede lanzar el error de dos formas distintas según la versión del SDK:
-      // - error.cause.data  (forma estándar)
-      // - error.data        (el objeto es lanzado directamente)
       const cause = error?.cause ?? error;
       if (cause?.data) {
-        const order = cause.data;
+        const order        = cause.data;
         const firstPayment = order.transactions?.payments?.[0];
-        const { userId } = this.parseExternalRef(externalRef);
+        const { clientId } = this.parseExternalRef(externalRef);
 
-        this.logger.warn(
-          `Pago rechazado — Orden: ${order.id} | Detalle: ${firstPayment?.status_detail}`,
-        );
+        this.logger.warn(`Pago rechazado — Orden: ${order.id} | Detalle: ${firstPayment?.status_detail}`);
 
         const result = {
-          order_id: order.id,
-          payment_id: firstPayment?.id,
-          status: order.status,
-          payment_status: firstPayment?.status,
+          order_id:             order.id,
+          payment_id:           firstPayment?.id,
+          status:               order.status,
+          payment_status:       firstPayment?.status,
           payment_status_detail: firstPayment?.status_detail,
-          total_amount: order.total_amount,
-          external_reference: order.external_reference,
-          date_created: order.created_date,
-          user_id: userId ?? null,
+          total_amount:         order.total_amount,
+          external_reference:   order.external_reference,
+          date_created:         order.created_date,
+          client_id:            clientId ?? null,
         };
 
-        // Guardar en BD y notificar a ServiaAPI aunque el pago fue rechazado
-        await this.savePayment({
-          orderId:             result.order_id,
-          paymentId:           result.payment_id,
-          status:              result.status,
-          paymentStatus:       result.payment_status,
-          paymentStatusDetail: result.payment_status_detail,
-          totalAmount:         result.total_amount,
-          externalReference:   result.external_reference,
-          userId:              result.user_id,
-        });
+        await this.savePayment(result);
         await this.forwardToServiaAPI(result);
-
         return result;
       }
+
       this.logger.error('Error al crear orden de pago — sin datos recuperables', error?.message ?? error);
       throw new BadRequestException(
         cause?.message ?? cause?.[0]?.description ?? 'No se pudo procesar el pago',
@@ -153,30 +124,30 @@ export class PaymentsService {
 
   async getOrder(id: string) {
     try {
-      const response = await this.order.get({ id } as any);
-      const r = response as any;
+      const response     = await this.order.get({ id } as any);
+      const r            = response as any;
       const firstPayment = r.transactions?.payments?.[0];
       return {
-        order_id: r.id,
-        payment_id: firstPayment?.id,
-        status: r.status,
-        payment_status: firstPayment?.status,
+        order_id:             r.id,
+        payment_id:           firstPayment?.id,
+        status:               r.status,
+        payment_status:       firstPayment?.status,
         payment_status_detail: firstPayment?.status_detail,
-        total_amount: r.total_amount,
-        currency: r.currency,
-        external_reference: r.external_reference,
-        description: r.description,
-        date_created: r.created_date,
-        date_updated: r.last_updated_date,
+        total_amount:         r.total_amount,
+        currency:             r.currency,
+        external_reference:   r.external_reference,
+        description:          r.description,
+        date_created:         r.created_date,
+        date_updated:         r.last_updated_date,
         payer: { email: r.payer?.email },
         payments: r.transactions?.payments?.map((p: any) => ({
-          id: p.id,
-          status: p.status,
-          status_detail: p.status_detail,
-          amount: p.amount,
-          paid_amount: p.paid_amount,
+          id:             p.id,
+          status:         p.status,
+          status_detail:  p.status_detail,
+          amount:         p.amount,
+          paid_amount:    p.paid_amount,
           payment_method: p.payment_method?.id,
-          installments: p.payment_method?.installments,
+          installments:   p.payment_method?.installments,
         })),
       };
     } catch (error) {
@@ -191,10 +162,10 @@ export class PaymentsService {
       return methods
         .filter((m) => ['credit_card', 'debit_card'].includes(m.payment_type_id))
         .map((m) => ({
-          id: m.id,
-          name: m.name,
-          type: m.payment_type_id,
-          thumbnail: m.thumbnail,
+          id:                 m.id,
+          name:               m.name,
+          type:               m.payment_type_id,
+          thumbnail:          m.thumbnail,
           min_allowed_amount: m.min_allowed_amount,
           max_allowed_amount: m.max_allowed_amount,
         }));
@@ -204,15 +175,15 @@ export class PaymentsService {
     }
   }
 
-  private parseExternalRef(ref: string): { userId?: string; orderId?: string } {
+  private parseExternalRef(ref: string): { clientId?: string; orderId?: string } {
     if (!ref) return {};
-    // Formato: "u_{userId}__o_{orderId}"  o  "o_{orderId}"
-    const match = ref.match(/^(?:u_(.+?)__)?o_(.+)$/);
-    return { userId: match?.[1], orderId: match?.[2] };
+    // Formato: "c_{clientId}__o_{orderId}"  o  "o_{orderId}"
+    const match = ref.match(/^(?:c_(.+?)__)?o_(.+)$/);
+    return { clientId: match?.[1], orderId: match?.[2] };
   }
 
   async handleWebhook(body: any) {
-    const type = body.type;
+    const type       = body.type;
     const resourceId = body.data?.id;
 
     if (!resourceId) return { received: true };
@@ -220,37 +191,32 @@ export class PaymentsService {
     this.logger.log(`Webhook recibido — tipo: ${type} | id: ${resourceId}`);
 
     try {
-      const paymentInfo = await this.payment.get({ id: resourceId });
-      const { userId, orderId } = this.parseExternalRef(
-        paymentInfo.external_reference ?? '',
-      );
+      const paymentInfo              = await this.payment.get({ id: resourceId });
+      const { clientId, orderId }    = this.parseExternalRef(paymentInfo.external_reference ?? '');
 
-      this.logger.log(
-        `Webhook — usuario: ${userId ?? 'N/A'} | orden: ${orderId ?? 'N/A'} | estado: ${paymentInfo.status}`,
-      );
+      this.logger.log(`Webhook — cliente: ${clientId ?? 'N/A'} | orden: ${orderId ?? 'N/A'} | estado: ${paymentInfo.status}`);
 
       const payload = {
-        payment_id:   String(paymentInfo.id),
-        status:       paymentInfo.status,
-        status_detail: paymentInfo.status_detail,
-        user_id:      userId ?? null,
-        order_id:     orderId ?? null,
-        amount:       paymentInfo.transaction_amount,
-        currency:     paymentInfo.currency_id,
-        date_approved: paymentInfo.date_approved,
+        payment_id:         String(paymentInfo.id),
+        status:             paymentInfo.status,
+        status_detail:      paymentInfo.status_detail,
+        client_id:          clientId ?? null,
+        order_id:           orderId  ?? null,
+        amount:             paymentInfo.transaction_amount,
+        currency:           paymentInfo.currency_id,
+        date_approved:      paymentInfo.date_approved,
         external_reference: paymentInfo.external_reference,
       };
 
-      // Actualizar estado en BD si el pago ya existe (ej: charged_back, refunded)
       await this.savePayment({
-        orderId:             orderId ?? resourceId,
-        paymentId:           String(paymentInfo.id),
-        status:              paymentInfo.status,
-        paymentStatus:       paymentInfo.status,
-        paymentStatusDetail: paymentInfo.status_detail ?? '',
-        totalAmount:         paymentInfo.transaction_amount ?? 0,
-        externalReference:   paymentInfo.external_reference ?? null,
-        userId:              userId ?? '0',
+        order_id:             orderId ?? resourceId,
+        payment_id:           String(paymentInfo.id),
+        status:               paymentInfo.status,
+        payment_status:       paymentInfo.status,
+        payment_status_detail: paymentInfo.status_detail ?? '',
+        total_amount:         paymentInfo.transaction_amount ?? 0,
+        external_reference:   paymentInfo.external_reference ?? null,
+        client_id:            clientId ?? null,
       });
       await this.forwardToServiaAPI(payload);
 
@@ -261,31 +227,32 @@ export class PaymentsService {
   }
 
   private async savePayment(data: {
-    orderId: string;
-    paymentId: string;
+    order_id: string;
+    payment_id: string;
     status: string;
-    paymentStatus: string;
-    paymentStatusDetail: string;
-    totalAmount: string | number;
-    externalReference: string;
-    userId: string | number;
+    payment_status: string;
+    payment_status_detail: string;
+    total_amount: string | number;
+    external_reference: string;
+    client_id?: string | number | null;
   }) {
     try {
       await this.paymentRepo.upsert(
         {
-          orderId:             data.orderId,
-          paymentId:           data.paymentId,
+          orderId:             data.order_id,
+          paymentId:           data.payment_id,
           status:              data.status,
-          paymentStatus:       data.paymentStatus,
-          paymentStatusDetail: data.paymentStatusDetail,
-          totalAmount:         Number(data.totalAmount),
-          externalReference:   data.externalReference ?? null,
-          userId:              Number(data.userId) || 0,
+          paymentStatus:       data.payment_status,
+          paymentStatusDetail: data.payment_status_detail,
+          totalAmount:         Number(data.total_amount),
+          externalReference:   data.external_reference ?? null,
+          userId:              0,
+          clientId:            data.client_id ? Number(data.client_id) : null,
         },
-        ['paymentId'], // columna única — si ya existe actualiza, si no inserta
+        ['paymentId'],
       );
 
-      this.logger.log(`DB ✅ Pago guardado/actualizado — PaymentId: ${data.paymentId}`);
+      this.logger.log(`DB ✅ Pago guardado/actualizado — PaymentId: ${data.payment_id}`);
     } catch (err) {
       this.logger.error(`DB ❌ Error guardando pago: ${err.message}`, err.stack);
     }
