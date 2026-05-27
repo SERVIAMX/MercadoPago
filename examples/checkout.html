@@ -38,6 +38,15 @@
     #result.rejected { background: #f8d7da; color: #721c24; }
     #result.pending  { background: #fff3cd; color: #856404; }
     #result.error    { background: #f8d7da; color: #721c24; }
+
+    .field-error { margin-top: 6px; font-size: 12px; color: #b3261e; display: none; line-height: 1.35; }
+    .label-invalid { color: #b3261e !important; }
+    .mp-field-invalid,
+    input.mp-field-invalid,
+    select.mp-field-invalid {
+      border-color: #b3261e !important;
+      box-shadow: 0 0 0 3px rgba(179, 38, 30, 0.12);
+    }
   </style>
 </head>
 <body>
@@ -55,27 +64,32 @@
       <label>Número de tarjeta</label>
       <!-- MP monta un iframe seguro aquí -->
       <div id="form-checkout__cardNumber"></div>
+      <div class="field-error" id="error-cardNumber"></div>
     </div>
 
     <div style="display:flex; gap:12px;">
       <div class="form-group" style="flex:1">
         <label>Vencimiento</label>
         <div id="form-checkout__expirationDate"></div>
+        <div class="field-error" id="error-expirationDate"></div>
       </div>
       <div class="form-group" style="flex:1">
         <label>CVV</label>
         <div id="form-checkout__securityCode"></div>
+        <div class="field-error" id="error-securityCode"></div>
       </div>
     </div>
 
     <div class="form-group">
       <label>Nombre en la tarjeta</label>
       <input type="text" id="form-checkout__cardholderName" placeholder="Como aparece en la tarjeta" />
+      <div class="field-error" id="error-cardholderName"></div>
     </div>
 
     <div class="form-group">
       <label>Email del comprador</label>
       <input type="email" id="form-checkout__cardholderEmail" placeholder="correo@ejemplo.com" />
+      <div class="field-error" id="error-cardholderEmail"></div>
     </div>
 
     <div class="form-group">
@@ -131,6 +145,184 @@
     // 1. Inicializar con tu PUBLIC KEY
     const mp = new MercadoPago('APP_USR-ff429938-4c7a-47c1-b882-674d04234f1e', { locale: 'es-MX' });
     // 2. Montar el CardForm — MP inyecta iframes seguros en los divs declarados
+    const FIELD_CONTAINER_ID = {
+      cardNumber: 'form-checkout__cardNumber',
+      expirationDate: 'form-checkout__expirationDate',
+      securityCode: 'form-checkout__securityCode',
+      cardholderName: 'form-checkout__cardholderName',
+      cardholderEmail: 'form-checkout__cardholderEmail',
+      issuer: 'form-checkout__issuer',
+      installments: 'form-checkout__installments',
+    };
+
+    const FIELD_LABELS = {
+      cardNumber: 'número de tarjeta',
+      expirationDate: 'fecha de vencimiento',
+      securityCode: 'CVV',
+      cardholderName: 'nombre en la tarjeta',
+      cardholderEmail: 'email',
+      issuer: 'banco emisor',
+    };
+
+    let expectedCvvLength = 3;
+
+    function normalizeMpErrors(error) {
+      if (!error) return [];
+      if (Array.isArray(error)) {
+        return error.map((e) => ({
+          code: e.code || e.cause,
+          message: e.message,
+        }));
+      }
+      if (Array.isArray(error.errorMessages)) {
+        return error.errorMessages.map((e) => ({
+          code: e.cause || e.code,
+          message: e.message,
+        }));
+      }
+      if (error.message || error.code || error.cause || error.error) {
+        return [{
+          code: error.code || error.cause,
+          message: error.message || error.error || String(error.cause || ''),
+        }];
+      }
+      return [];
+    }
+
+    function translateMpError(code, field, fallbackMessage) {
+      const label = FIELD_LABELS[field] || field;
+
+      const byCode = {
+        invalid_length: () => {
+          if (field === 'securityCode') {
+            return expectedCvvLength === 4
+              ? 'El CVV de American Express debe tener 4 dígitos.'
+              : 'El CVV debe tener 3 dígitos.';
+          }
+          if (field === 'cardNumber') return 'El número de tarjeta no tiene la cantidad de dígitos correcta.';
+          return `Revisa la longitud del campo ${label}.`;
+        },
+        invalid_type: () => {
+          if (field === 'securityCode' || field === 'cardNumber') {
+            return `El campo ${label} solo debe contener números.`;
+          }
+          return `El formato del campo ${label} no es válido.`;
+        },
+        invalid_value: () => {
+          if (field === 'expirationDate') return 'La fecha de vencimiento no es válida o ya expiró.';
+          return `El valor del campo ${label} no es válido.`;
+        },
+        empty: () => `Completa el campo ${label}.`,
+        required: () => `Completa el campo ${label}.`,
+      };
+
+      if (code && byCode[code]) return byCode[code]();
+
+      if (fallbackMessage && !/undefined|operation_failed|validar la tarjeta/i.test(fallbackMessage)) {
+        return fallbackMessage;
+      }
+
+      return `Revisa el campo ${label}.`;
+    }
+
+    function getFieldElement(field) {
+      const id = FIELD_CONTAINER_ID[field];
+      return id ? document.getElementById(id) : null;
+    }
+
+    function setFieldError(field, message) {
+      const el = getFieldElement(field);
+      const errorEl = document.getElementById(`error-${field}`);
+      const group = el?.closest('.form-group');
+      const label = group?.querySelector('label');
+
+      if (el) el.classList.toggle('mp-field-invalid', Boolean(message));
+      if (label) label.classList.toggle('label-invalid', Boolean(message));
+
+      if (!errorEl) return;
+      if (!message) {
+        errorEl.textContent = '';
+        errorEl.style.display = 'none';
+        return;
+      }
+      errorEl.textContent = message;
+      errorEl.style.display = 'block';
+    }
+
+    function clearAllFieldErrors() {
+      Object.keys(FIELD_CONTAINER_ID).forEach((field) => setFieldError(field, null));
+    }
+
+    function applyFieldErrorsFromMp(error, field) {
+      const items = normalizeMpErrors(error);
+      if (!field) return items;
+
+      if (items.length === 0) {
+        setFieldError(field, null);
+        return items;
+      }
+
+      const msg = items
+        .map((e) => translateMpError(e.code, field, e.message))
+        .filter(Boolean)
+        .join(' ');
+
+      setFieldError(field, msg);
+      return items;
+    }
+
+    function guessFieldFromMessage(message) {
+      const m = (message || '').toLowerCase();
+      if (/cvv|security|seguridad|código/.test(m)) return 'securityCode';
+      if (/expir|vencimiento|fecha/.test(m)) return 'expirationDate';
+      if (/tarjeta|card|número|numero|bin/.test(m)) return 'cardNumber';
+      if (/email|correo/.test(m)) return 'cardholderEmail';
+      if (/nombre|holder|titular/.test(m)) return 'cardholderName';
+      return null;
+    }
+
+    function validateNativeFields() {
+      let valid = true;
+
+      const name = document.getElementById('form-checkout__cardholderName').value.trim();
+      if (!name) {
+        setFieldError('cardholderName', 'Escribe el nombre tal como aparece en la tarjeta.');
+        valid = false;
+      } else {
+        setFieldError('cardholderName', null);
+      }
+
+      const email = document.getElementById('form-checkout__cardholderEmail').value.trim();
+      if (!email) {
+        setFieldError('cardholderEmail', 'Ingresa el email del comprador.');
+        valid = false;
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        setFieldError('cardholderEmail', 'El email no tiene un formato válido.');
+        valid = false;
+      } else {
+        setFieldError('cardholderEmail', null);
+      }
+
+      return valid;
+    }
+
+    ['cardholderName', 'cardholderEmail'].forEach((field) => {
+      const el = getFieldElement(field);
+      el?.addEventListener('input', () => setFieldError(field, null));
+      el?.addEventListener('blur', () => {
+        if (field === 'cardholderName' && !el.value.trim()) {
+          setFieldError(field, 'Escribe el nombre tal como aparece en la tarjeta.');
+        }
+        if (field === 'cardholderEmail') {
+          const v = el.value.trim();
+          if (!v) setFieldError(field, 'Ingresa el email del comprador.');
+          else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+            setFieldError(field, 'El email no tiene un formato válido.');
+          }
+        }
+      });
+    });
+
     const cardForm = mp.cardForm({
       amount: amountInput.value || '1', // MP requiere un valor inicial, se sobreescribe al submit
       iframe: true,
@@ -152,11 +344,71 @@
         onReady: () => {
           console.log('✅ CardForm listo para recibir datos');
         },
+        onBinChange: (bin) => {
+          const prefix = String(bin || '').slice(0, 2);
+          // Amex suele requerir CVV de 4 dígitos
+          if (prefix === '34' || prefix === '37') expectedCvvLength = 4;
+          else expectedCvvLength = 3;
+        },
+        onPaymentMethodsReceived: (error, data) => {
+          if (error) return console.warn('paymentMethods error:', error);
+          const settings = data?.results?.[0]?.settings?.[0];
+          const cvvLen = settings?.security_code?.length;
+          if (cvvLen) expectedCvvLength = cvvLen;
+        },
+        onValidityChange: (error, field) => {
+          if (!field) return;
+          applyFieldErrorsFromMp(error, field);
+        },
+        onError: (error) => {
+          console.error('CardForm error:', error);
+          const items = normalizeMpErrors(error);
+          const field = error?.field;
+
+          if (field) {
+            applyFieldErrorsFromMp(error, field);
+            return;
+          }
+
+          if (items.length) {
+            items.forEach((item) => {
+              const targetField =
+                guessFieldFromMessage(item.message) || 'securityCode';
+              setFieldError(
+                targetField,
+                translateMpError(item.code, targetField, item.message),
+              );
+            });
+            return;
+          }
+
+          mostrarResultado({
+            status: 'error',
+            error: 'No se pudo validar la tarjeta. Revisa número, vencimiento y CVV.',
+          });
+        },
+        onCardTokenReceived: (error) => {
+          if (!error) return;
+          console.error('Card token error:', error);
+          const items = normalizeMpErrors(error);
+          if (items.length) {
+            setFieldError(
+              'securityCode',
+              translateMpError(items[0].code, 'securityCode', items[0].message),
+            );
+            return;
+          }
+          mostrarResultado({
+            status: 'error',
+            error: 'No se pudo generar el token de la tarjeta. Verifica los datos ingresados.',
+          });
+        },
 
         // 3. Al hacer submit MP tokeniza la tarjeta y llama este callback
         onSubmit: async (event) => {
           event.preventDefault();
           const btn = document.getElementById('form-checkout__submit');
+          document.getElementById('result').style.display = 'none';
 
           // Tomar monto del input (viene de URL, no editable)
           const inputAmount = parseFloat(document.getElementById('payment-amount').value);
@@ -164,6 +416,9 @@
             alert('Monto inválido. Verifica la URL.');
             return;
           }
+
+          const nativeOk = validateNativeFields();
+          if (!nativeOk) return;
 
           btn.disabled = true;
           btn.textContent = 'Procesando...';
@@ -176,6 +431,19 @@
           } = cardForm.getCardFormData();
 
           try {
+            if (!token) {
+              const cvvMsg = expectedCvvLength === 4
+                ? 'El CVV de American Express debe tener 4 dígitos.'
+                : 'El CVV debe tener 3 dígitos.';
+              setFieldError('cardNumber', 'Verifica el número de tarjeta.');
+              setFieldError('expirationDate', 'Verifica la fecha de vencimiento (MM/AA).');
+              setFieldError('securityCode', cvvMsg);
+              mostrarResultado({
+                status: 'error',
+                error: 'Corrige los campos marcados en rojo antes de continuar.',
+              });
+              return;
+            }
             const response = await fetch('https://servia.mx/pagos/api/payments', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
