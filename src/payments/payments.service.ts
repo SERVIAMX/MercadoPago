@@ -83,6 +83,7 @@ export class PaymentsService {
         external_reference:   (response as any).external_reference,
         date_created:         (response as any).date_created,
         client_id:            clientId ?? null,
+        ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
       };
 
       await this.savePayment(result);
@@ -108,6 +109,7 @@ export class PaymentsService {
           external_reference:   order.external_reference,
           date_created:         order.created_date,
           client_id:            clientId ?? null,
+          ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
         };
 
         await this.savePayment(result);
@@ -235,11 +237,12 @@ export class PaymentsService {
     total_amount: string | number;
     external_reference: string;
     client_id?: string | number | null;
+    id_history_balance?: string | number | null;
   }) {
     try {
       await this.paymentRepo.upsert(
         {
-          orderId:             data.order_id,
+          orderId:            data.order_id,
           paymentId:           data.payment_id,
           status:              data.status,
           paymentStatus:       data.payment_status,
@@ -248,6 +251,7 @@ export class PaymentsService {
           externalReference:   data.external_reference ?? null,
           userId:              0,
           clientId:            data.client_id ? Number(data.client_id) : null,
+          idHistoryBalance:    data.id_history_balance ? Number(data.id_history_balance) : null,
         },
         ['paymentId'],
       );

@@ -50,4 +50,7 @@ export class Payment {
 
   @Column({ type: 'bigint', unsigned: true, nullable: true, name: 'ClientId' })
   clientId: number | null;
+
+  @Column({ type: 'bigint', nullable: true, name: 'IdHistoryBalance' })
+  idHistoryBalance: number | null;
 }

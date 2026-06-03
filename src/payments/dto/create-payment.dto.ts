@@ -85,4 +85,12 @@ export class CreatePaymentDto {
   @IsOptional()
   @IsString()
   client_id?: string;
+
+  @ApiPropertyOptional({
+    example: '789',
+    description: 'ID del historial de balance relacionado al pago',
+  })
+  @IsOptional()
+  @IsString()
+  id_history_balance?: string;
 }

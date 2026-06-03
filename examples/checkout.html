@@ -125,13 +125,14 @@
   <script src="https://sdk.mercadopago.com/js/v2"></script>
   <script>
     // Leer parámetros que Flutter pasa por URL
-    const params   = new URLSearchParams(window.location.search);
-    const clientId = params.get('clientId') || document.getElementById('client-id').value;
-    const extRef   = params.get('ref')      || ('orden-' + Date.now());
-    const amount   = params.get('amount');
+    const params          = new URLSearchParams(window.location.search);
+    const clientId        = params.get('clientId') || document.getElementById('client-id').value;
+    const extRef          = params.get('ref')      || ('orden-' + Date.now());
+    const amount          = params.get('amount');
+    const idHistoryBalance = params.get('idHistoryBalance') || null;
 
     console.log('URL completa:', window.location.href);
-    console.log('Params → clientId:', clientId, '| ref:', extRef, '| amount:', amount);
+    console.log('Params → clientId:', clientId, '| ref:', extRef, '| amount:', amount, '| idHistoryBalance:', idHistoryBalance);
 
     // Setear monto desde URL — disabled para que no se pueda editar
     const amountInput = document.getElementById('payment-amount');
@@ -455,6 +456,7 @@
                 description: 'Compra en Servia',
                 external_reference: extRef,
                 client_id: clientId,
+                ...(idHistoryBalance !== null && { id_history_balance: idHistoryBalance }),
                 payer: { email },
               }),
             });
