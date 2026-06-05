@@ -15,6 +15,7 @@ import {
 } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { CreateSpeiPaymentDto } from './dto/create-spei-payment.dto';
 import { WebhookPaymentDto } from './dto/webhook-payment.dto';
 
 @ApiTags('payments')
@@ -26,6 +27,13 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Crear un pago con tarjeta (Checkout API)' })
   create(@Body() dto: CreatePaymentDto) {
     return this.paymentsService.createPayment(dto);
+  }
+
+  @Post('spei')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Generar CLABE SPEI para pago por transferencia interbancaria' })
+  createSpei(@Body() dto: CreateSpeiPaymentDto) {
+    return this.paymentsService.createSpeiPayment(dto);
   }
 
   @Get('config/methods')

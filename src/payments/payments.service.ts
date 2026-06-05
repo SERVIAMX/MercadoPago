@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import MercadoPagoConfig, { Order, Payment, PaymentMethod } from 'mercadopago';
 import { v4 as uuidv4 } from 'uuid';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { CreateSpeiPaymentDto } from './dto/create-spei-payment.dto';
 import { Payment as PaymentEntity } from './entities/payment.entity';
 
 @Injectable()
@@ -120,6 +121,76 @@ export class PaymentsService {
       this.logger.error('Error al crear orden de pago — sin datos recuperables', error?.message ?? error);
       throw new BadRequestException(
         cause?.message ?? cause?.[0]?.description ?? 'No se pudo procesar el pago',
+      );
+    }
+  }
+
+  async createSpeiPayment(dto: CreateSpeiPaymentDto) {
+    const ordRef      = dto.external_reference ?? `${Date.now()}`;
+    const externalRef = dto.client_id
+      ? `c_${dto.client_id}__o_${ordRef}`
+      : `o_${ordRef}`;
+
+    // Vigencia: 3 días desde ahora
+    const expirationDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+
+    try {
+      const response = await this.payment.create({
+        body: {
+          transaction_amount: dto.transaction_amount,
+          description:        dto.description ?? 'Pago SPEI — Servia',
+          payment_method_id:  'clabe',
+          payer: { email: dto.payer.email },
+          date_of_expiration: expirationDate,
+          external_reference: externalRef,
+        } as any,
+        requestOptions: { idempotencyKey: uuidv4() },
+      });
+
+      const r             = response as any;
+      const { clientId }  = this.parseExternalRef(externalRef);
+      const td            = r.transaction_details ?? {};
+      const poi           = r.point_of_interaction?.transaction_data ?? {};
+
+      // MP puede devolver la CLABE en distintos campos según versión del SDK
+      const clabe = poi.bank_transfer_id ?? poi.financial_institution ?? td.financial_institution ?? null;
+      const banco = td.financial_institution ?? poi.financial_institution ?? 'STP';
+
+      this.logger.log(`SPEI creado: ${r.id} | Estado: ${r.status} | CLABE: ${clabe}`);
+
+      const result = {
+        payment_id:         String(r.id),
+        status:             r.status,
+        status_detail:      r.status_detail,
+        clabe,
+        banco,
+        amount:             r.transaction_amount,
+        external_reference: r.external_reference,
+        date_of_expiration: r.date_of_expiration,
+        client_id:          clientId ?? null,
+        ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
+      };
+
+      await this.savePayment({
+        order_id:             String(r.id),
+        payment_id:           String(r.id),
+        status:               r.status ?? 'pending',
+        payment_status:       r.status ?? 'pending',
+        payment_status_detail: r.status_detail ?? '',
+        total_amount:         r.transaction_amount ?? 0,
+        external_reference:   r.external_reference ?? null,
+        client_id:            clientId ?? null,
+        id_history_balance:   dto.id_history_balance ?? null,
+      });
+      await this.forwardToServiaAPI(result);
+
+      return result;
+
+    } catch (error) {
+      const cause = error?.cause ?? error;
+      this.logger.error('Error al crear pago SPEI', error?.message ?? error);
+      throw new BadRequestException(
+        cause?.message ?? cause?.[0]?.description ?? 'No se pudo generar el pago SPEI',
       );
     }
   }
