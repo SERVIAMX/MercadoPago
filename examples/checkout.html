@@ -4,19 +4,61 @@
   <meta charset="UTF-8" />
   <title>Pago con tarjeta — Mercado Pago Checkout API</title>
   <style>
-    body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 20px; }
-    .form-group { margin-bottom: 16px; }
-    label { display: block; font-size: 13px; margin-bottom: 4px; color: #555; }
-    /* Contenedores de iframes de MP */
+    /* ── Servia Dark Theme ── */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: sans-serif;
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 24px 20px 40px;
+      background-color: #010E22;
+      color: #FFFFFF;
+      min-height: 100vh;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    h2 {
+      color: #FFFFFF;
+      font-size: 20px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: 0.3px;
+    }
+
+    .mp-logo {
+      height: 32px;
+      width: auto;
+      object-fit: contain;
+    }
+
+    .form-group { margin-bottom: 18px; }
+
+    label {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 6px;
+      color: #FFFFFF;
+      font-weight: 500;
+    }
+
+    /* ── Contenedores de iframes de MP ── */
     #form-checkout__cardNumber,
     #form-checkout__expirationDate,
     #form-checkout__securityCode {
-      border: 1px solid #ccc;
-      border-radius: 6px;
+      border: 1.5px solid #378ADD;
+      border-radius: 10px;
       height: 48px;
-      box-sizing: border-box;
+      background-color: #051629;
       position: relative;
     }
+
     /* El iframe que inyecta MP */
     #form-checkout__cardNumber iframe,
     #form-checkout__expirationDate iframe,
@@ -29,29 +71,193 @@
       border: none;
       pointer-events: auto;
     }
-    input, select { width: 100%; border: 1px solid #ccc; border-radius: 6px; height: 40px; padding: 0 8px; box-sizing: border-box; }
-    input:disabled { background: #f5f5f5; color: #333; cursor: not-allowed; font-weight: 600; }
-    button { width: 100%; background: #009EE3; color: #fff; border: none; border-radius: 6px; height: 44px; font-size: 16px; cursor: pointer; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #result { margin-top: 20px; padding: 12px; border-radius: 6px; display: none; }
-    #result.approved { background: #d4edda; color: #155724; }
-    #result.rejected { background: #f8d7da; color: #721c24; }
-    #result.pending  { background: #fff3cd; color: #856404; }
-    #result.error    { background: #f8d7da; color: #721c24; }
 
-    .field-error { margin-top: 6px; font-size: 12px; color: #b3261e; display: none; line-height: 1.35; }
-    .label-invalid { color: #b3261e !important; }
+    input, select {
+      width: 100%;
+      border: 1.5px solid #378ADD;
+      border-radius: 10px;
+      height: 48px;
+      padding: 0 12px;
+      background-color: #051629;
+      color: #FFFFFF;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    input::placeholder { color: #737373; }
+
+    input:focus, select:focus {
+      border-color: #5FA8E8;
+      box-shadow: 0 0 0 3px rgba(55, 138, 221, 0.20);
+    }
+
+    input:disabled {
+      background-color: #0A1E35;
+      color: #FFFFFF;
+      cursor: not-allowed;
+      font-weight: 700;
+      font-size: 16px;
+      border-color: #378ADD;
+      opacity: 0.85;
+    }
+
+    /* Select arrow custom */
+    select {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23378ADD' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      padding-right: 36px;
+    }
+
+    select option {
+      background-color: #051629;
+      color: #FFFFFF;
+    }
+
+    /* ── Promo Banner ── */
+    .promo-banner {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      margin-bottom: 16px;
+      filter: drop-shadow(0 3px 8px rgba(0,0,0,0.4));
+    }
+
+    .promo-badge {
+      position: relative;
+      flex-shrink: 0;
+      width: 100px;
+      height: 100px;
+      background: linear-gradient(90deg, #00d2ff 0%, #3a47d5 100%);
+      clip-path: polygon(50% 0%, 61% 10%, 75% 4%, 79% 18%, 93% 21%, 90% 35%, 100% 44%, 92% 56%, 96% 70%, 82% 74%, 79% 88%, 65% 85%, 56% 96%, 44% 88%, 30% 93%, 24% 79%, 10% 78%, 10% 63%, 0% 54%, 8% 42%, 3% 28%, 17% 23%, 18% 8%, 33% 9%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 2;
+    }
+
+    .promo-badge .badge-amount {
+      font-size: 30px;
+      font-weight: 900;
+      color: #FFFFFF;
+      line-height: 1;
+    }
+
+    .promo-badge .badge-label {
+      font-size: 9px;
+      font-weight: 700;
+      color: #FFFFFF;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      line-height: 1.2;
+    }
+
+    .promo-body {
+      flex: 1;
+      background: linear-gradient(90deg, #FC466B 0%, #3F5EFB 100%);
+      clip-path: polygon(0% 0%, 100% 0%, 94% 50%, 100% 100%, 0% 100%);
+      padding: 10px 28px 10px 6px;
+      margin-left: -22px;
+      min-height: 56px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .promo-body .promo-title {
+      font-size: 12px;
+      font-weight: 800;
+      color: #FFFFFF;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      line-height: 1.3;
+      padding: 2px 20px;
+    }
+
+    .promo-body .promo-sub {
+      display: inline-block;
+      margin-top: 3px;
+      background: linear-gradient(90deg, #FC466B 0%, #3F5EFB 100%);
+      color: #FFFFFF;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 40px;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-left: -4px;
+    }
+
+    button {
+      width: 100%;
+      background: #378ADD;
+      color: #FFFFFF;
+      border: none;
+      border-radius: 16px;
+      height: 52px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      letter-spacing: 0.4px;
+      transition: background 0.2s, opacity 0.2s;
+    }
+
+    button:hover:not(:disabled) { background: #2F6BB5; }
+    button:active:not(:disabled) { background: #2560A8; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Result messages ── */
+    #result {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      display: none;
+      font-size: 14px;
+      border: 1.5px solid transparent;
+    }
+    #result.approved { background: rgba(34, 197, 94, 0.12); color: #4ADE80; border-color: rgba(34,197,94,0.3); }
+    #result.rejected { background: rgba(239, 68, 68, 0.12); color: #F87171; border-color: rgba(239,68,68,0.3); }
+    #result.pending  { background: rgba(234, 179, 8, 0.12);  color: #FCD34D; border-color: rgba(234,179,8,0.3); }
+    #result.in_process { background: rgba(234, 179, 8, 0.12); color: #FCD34D; border-color: rgba(234,179,8,0.3); }
+    #result.error    { background: rgba(239, 68, 68, 0.12); color: #F87171; border-color: rgba(239,68,68,0.3); }
+
+    /* ── Validation errors ── */
+    .field-error {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #FF6B6B;
+      display: none;
+      line-height: 1.4;
+    }
+
+    .label-invalid { color: #FF6B6B !important; }
+
     .mp-field-invalid,
     input.mp-field-invalid,
     select.mp-field-invalid {
-      border-color: #b3261e !important;
-      box-shadow: 0 0 0 3px rgba(179, 38, 30, 0.12);
+      border-color: #FF6B6B !important;
+      box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.18);
+    }
+
+    #form-checkout__cardNumber.mp-field-invalid,
+    #form-checkout__expirationDate.mp-field-invalid,
+    #form-checkout__securityCode.mp-field-invalid {
+      border-color: #FF6B6B !important;
+      box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.18);
     }
   </style>
 </head>
 <body>
 
-  <h2>Pago con tarjeta</h2>
+  <div class="page-header">
+    <h2>Pago con tarjeta</h2>
+    <img src="https://serviasys.s3.us-east-1.amazonaws.com/imagenes/logo-mercadopago-blanco.png" alt="Mercado Pago" class="mp-logo" />
+  </div>
 
   <form id="form-checkout">
 
@@ -115,6 +321,18 @@
 
     <!-- ID del cliente — normalmente viene del JWT/sesión, no del formulario -->
     <input type="hidden" id="client-id" value="" />
+
+    <!-- Promo Banner -->
+    <div class="promo-banner">
+      <div class="promo-badge">
+        <span class="badge-amount">$50</span>
+        <span class="badge-label">gratis</span>
+      </div>
+      <div class="promo-body">
+        <span class="promo-title">🤑 ¡Premiamos tus depósitos SPEI! 🎉</span>
+        <span class="promo-sub">Realiza 3 depósitos de $1,000+ y recibe $50 a tu saldo.</span>
+      </div>
+    </div>
 
     <button type="submit" id="form-checkout__submit">Pagar $150.00 MXN</button>
   </form>
