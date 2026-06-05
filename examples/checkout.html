@@ -192,62 +192,33 @@
       margin-left: -4px;
     }
 
-    /* ── Promo Banner Responsive ── */
-    @media (max-width: 380px) {
+    /* ── Promo Banner Responsive (< 464px) ── */
+    @media (max-width: 463px) {
       .promo-badge {
-        width: 76px;
-        height: 76px;
-        flex-shrink: 0;
+        width: 80px;
+        height: 80px;
       }
       .promo-badge .badge-amount {
-        font-size: 22px;
-      }
-      .promo-badge .badge-label {
-        font-size: 8px;
+        font-size: 24px;
       }
       .promo-body {
-        padding: 8px 22px 8px 6px;
-        min-height: 48px;
+        clip-path: polygon(0% 0%, 100% 0%, 96% 50%, 100% 100%, 0% 100%);
+        margin-left: -16px;
+        padding: 8px 16px 8px 20px;
+        min-height: 50px;
       }
       .promo-body .promo-title {
         font-size: 10px;
-        padding: 2px 10px;
-        letter-spacing: 0.3px;
+        padding: 0;
+        letter-spacing: 0.2px;
+        white-space: normal;
       }
       .promo-body .promo-sub {
         font-size: 9px;
-        padding: 2px 10px;
-      }
-    }
-
-    @media (max-width: 300px) {
-      .promo-banner {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 8px;
-        filter: none;
-      }
-      .promo-badge {
-        width: 68px;
-        height: 68px;
-        align-self: center;
-      }
-      .promo-body {
-        clip-path: none;
-        border-radius: 10px;
+        padding: 2px 6px;
         margin-left: 0;
-        padding: 10px 14px;
-        text-align: center;
-        min-height: unset;
-      }
-      .promo-body .promo-title {
-        padding: 0;
-        font-size: 11px;
-      }
-      .promo-body .promo-sub {
-        margin-left: 0;
-        padding: 3px 10px;
-        font-size: 10px;
+        white-space: normal;
+        word-break: break-word;
       }
     }
 
