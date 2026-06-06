@@ -1,7 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import MercadoPagoConfig, { Order, Payment, PaymentMethod } from 'mercadopago';
 import { v4 as uuidv4 } from 'uuid';
 import { CreatePaymentDto } from './dto/create-payment.dto';
@@ -11,10 +11,14 @@ import { Payment as PaymentEntity } from './entities/payment.entity';
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
+  // Cliente Orders API — tarjetas
   private readonly mpClient: MercadoPagoConfig;
   private readonly order: Order;
   private readonly payment: Payment;
   private readonly paymentMethod: PaymentMethod;
+  // Cliente Payments API — SPEI
+  private readonly mpClientSpei: MercadoPagoConfig;
+  private readonly paymentSpei: Payment;
 
   constructor(
     private readonly configService: ConfigService,
@@ -25,13 +29,303 @@ export class PaymentsService {
       accessToken: this.configService.get<string>('MP_ACCESS_TOKEN'),
       options: { timeout: 10000 },
     });
-    this.order = new Order(this.mpClient);
-    this.payment = new Payment(this.mpClient);
+    this.order         = new Order(this.mpClient);
+    this.payment       = new Payment(this.mpClient);
     this.paymentMethod = new PaymentMethod(this.mpClient);
+
+    this.mpClientSpei = new MercadoPagoConfig({
+      accessToken: this.configService.get<string>('MP_ACCESS_TOKEN_SPEI'),
+      options: { timeout: 10000 },
+    });
+    this.paymentSpei = new Payment(this.mpClientSpei);
+  }
+
+  /**
+   * SPEI usa Orders API (/v1/orders) con MP_ACCESS_TOKEN (APP_USR).
+   * MP no acepta credenciales TEST- en Orders; en sandbox se usa APP_USR + comprador @testuser.com.
+   */
+  private resolveSpeiPayerEmail(email: string): string {
+    const normalized = email?.trim();
+    if (!normalized) {
+      throw new BadRequestException('Falta payer.email en la petición SPEI.');
+    }
+    if (normalized.toLowerCase().endsWith('@testuser.com')) {
+      return normalized;
+    }
+    const testBuyer =
+      this.configService.get<string>('MP_TEST_BUYER_EMAIL_SPEI') ??
+      this.configService.get<string>('MP_TEST_BUYER_EMAIL');
+    if (testBuyer?.trim()) {
+      return testBuyer.trim();
+    }
+    return normalized;
+  }
+
+  private extractNumericPaymentId(ticketUrl?: string | null): string | null {
+    if (!ticketUrl) return null;
+    const match = ticketUrl.match(/\/payments\/(\d+)\//);
+    return match?.[1] ?? null;
+  }
+
+  private extractSpeiData(source: any) {
+    const isOrder = source?.transactions?.payments != null;
+    const firstPayment = isOrder
+      ? source.transactions.payments[0]
+      : source;
+    const pm = firstPayment?.payment_method ?? source?.payment_method;
+    const td = source?.transaction_details ?? firstPayment?.transaction_details;
+
+    const clabe =
+      pm?.data?.reference_id
+      ?? td?.payment_method_reference_id
+      ?? pm?.reference
+      ?? null;
+
+    const referencia =
+      pm?.data?.external_reference_id
+      ?? td?.acquirer_reference
+      ?? null;
+
+    return {
+      order_id:           isOrder ? String(source.id) : String(source.order?.id ?? source.id),
+      payment_id:         String(firstPayment?.id ?? source.id),
+      status:             source.status ?? firstPayment?.status,
+      status_detail:      source.status_detail ?? firstPayment?.status_detail,
+      clabe,
+      referencia:         referencia ? String(referencia) : null,
+      banco:              td?.financial_institution ?? 'STP',
+      amount:             source.total_amount ?? source.transaction_amount,
+      external_reference: source.external_reference,
+      date_of_expiration: firstPayment?.date_of_expiration ?? source.date_of_expiration,
+      sandbox_url:        pm?.ticket_url ?? pm?.data?.external_resource_url ?? td?.external_resource_url ?? null,
+      date_approved:      source.date_approved ?? firstPayment?.date_approved,
+      currency:           source.currency ?? source.currency_id,
+    };
+  }
+
+  private async enrichSpeiFromPayment<T extends {
+    clabe?: string | null;
+    referencia?: string | null;
+    sandbox_url?: string | null;
+  }>(spei: T, orderSource?: any): Promise<T> {
+    if (spei.referencia && spei.clabe) return spei;
+
+    const ticketUrl =
+      orderSource?.transactions?.payments?.[0]?.payment_method?.ticket_url
+      ?? spei.sandbox_url;
+    const paymentId = this.extractNumericPaymentId(ticketUrl);
+    if (!paymentId) return spei;
+
+    try {
+      const payment = await this.payment.get({ id: paymentId }) as any;
+      const enriched = this.extractSpeiData(payment);
+      return {
+        ...spei,
+        clabe: spei.clabe ?? enriched.clabe,
+        referencia: spei.referencia ?? enriched.referencia,
+        sandbox_url: spei.sandbox_url ?? enriched.sandbox_url,
+      };
+    } catch {
+      return spei;
+    }
+  }
+
+  private readonly speiPendingStatuses = ['action_required', 'pending', 'processing'];
+
+  private delay(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private isSpeiProcessingError(error: any): boolean {
+    return /processing_error/i.test(this.extractMpErrorMessage(error, ''));
+  }
+
+  /** Evita crear otra orden en MP si ya hay una SPEI pendiente con la misma ref y monto. */
+  private async findReusablePendingSpei(
+    externalRef: string,
+    amount: number,
+    clientId?: number | null,
+  ) {
+    const rows = await this.paymentRepo.find({
+      where: {
+        externalReference: externalRef,
+        paymentStatus: In(this.speiPendingStatuses),
+        ...(clientId != null ? { clientId } : {}),
+      },
+      order: { fhRegistro: 'DESC' },
+      take: 5,
+    });
+
+    for (const row of rows) {
+      if (Math.abs(Number(row.totalAmount) - amount) > 0.009) continue;
+      if (!row.orderId?.startsWith('ORD')) continue;
+
+      try {
+        const raw  = await this.order.get({ id: row.orderId } as any);
+        const spei = await this.enrichSpeiFromPayment(this.extractSpeiData(raw), raw);
+        if (!this.speiPendingStatuses.includes(String(spei.status)) || !spei.clabe) continue;
+        return spei;
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  private buildSpeiResponse(
+    spei: ReturnType<PaymentsService['extractSpeiData']>,
+    clientId: string | null,
+    dto: CreateSpeiPaymentDto,
+    reused = false,
+  ) {
+    return {
+      order_id:           spei.order_id,
+      payment_id:         spei.payment_id,
+      status:             spei.status,
+      status_detail:      spei.status_detail,
+      clabe:              spei.clabe,
+      referencia:         spei.referencia,
+      banco:              spei.banco,
+      amount:             spei.amount,
+      external_reference: spei.external_reference,
+      date_of_expiration: spei.date_of_expiration,
+      client_id:          clientId,
+      sandbox_url:        spei.sandbox_url,
+      ...(reused && { reused_pending: true }),
+      ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
+    };
+  }
+
+  private async persistSpeiResult(
+    spei: ReturnType<PaymentsService['extractSpeiData']>,
+    clientId: string | null,
+    dto: CreateSpeiPaymentDto,
+  ) {
+    await this.savePayment({
+      order_id:             spei.order_id,
+      payment_id:           spei.payment_id,
+      status:               spei.status ?? 'action_required',
+      payment_status:       spei.status ?? 'action_required',
+      payment_status_detail: spei.status_detail ?? '',
+      total_amount:         spei.amount ?? 0,
+      external_reference:   spei.external_reference ?? null,
+      referencia:           spei.referencia ?? null,
+      client_id:            clientId,
+      id_history_balance:   dto.id_history_balance ?? null,
+    });
+  }
+
+  private async createSpeiOrder(body: Record<string, unknown>, idempotencyKey: string) {
+    const maxAttempts = 3;
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await this.order.create({
+          body,
+          requestOptions: { idempotencyKey: `${idempotencyKey}-a${attempt}` },
+        } as any);
+      } catch (error) {
+        lastError = error;
+        if (!this.isSpeiProcessingError(error) || attempt === maxAttempts) throw error;
+        this.logger.warn(`SPEI processing_error — reintento ${attempt}/${maxAttempts - 1}`);
+        await this.delay(1500 * attempt);
+      }
+    }
+    throw lastError;
+  }
+
+  private async fetchSpeiResource(id: string) {
+    if (id.startsWith('ORD')) {
+      return this.order.get({ id } as any);
+    }
+    return this.payment.get({ id });
+  }
+  private getCardTestBuyerEmail(): string {
+    return (
+      this.configService.get<string>('MP_TEST_BUYER_EMAIL') ??
+      'test_user_1114942131583705234@testuser.com'
+    );
+  }
+
+  /** Tarjetas: valida email según credenciales Orders (MP_ACCESS_TOKEN). */
+  private resolveCardPayerEmail(email: string): string {
+    const token = this.configService.get<string>('MP_ACCESS_TOKEN') ?? '';
+    const isTest = token.startsWith('TEST-');
+    const normalized = email?.trim().toLowerCase();
+
+    if (isTest) {
+      if (normalized?.endsWith('@testuser.com')) return email.trim();
+      if (!normalized) {
+        throw new BadRequestException(
+          'Falta payer.email. En sandbox usa el comprador de prueba (@testuser.com).',
+        );
+      }
+      throw new BadRequestException(
+        `Email "${email}" no válido en sandbox. Usa ${this.getCardTestBuyerEmail()}.`,
+      );
+    }
+
+    if (normalized?.endsWith('@testuser.com')) {
+      throw new BadRequestException(
+        'Tarjetas en producción (APP_USR): no uses emails @testuser.com. Usa el email real del comprador.',
+      );
+    }
+    if (!normalized) {
+      throw new BadRequestException('Falta payer.email en la petición.');
+    }
+    return email.trim();
+  }
+
+  private extractMpErrorMessage(error: any, fallback: string): string {
+    const src = error?.cause ?? error;
+
+    if (typeof src === 'string') return src;
+    if (src?.message) return String(src.message);
+
+    const mpErrors = src?.errors;
+    if (Array.isArray(mpErrors) && mpErrors.length > 0) {
+      const e = mpErrors[0];
+      const paymentDetail = src?.data?.transactions?.payments?.[0]?.status_detail;
+      const parts = [e.message, ...(e.details ?? []), paymentDetail].filter(Boolean);
+      return parts.join(' — ');
+    }
+
+    if (Array.isArray(src) && src[0]?.description) return src[0].description;
+
+    const paymentDetail = src?.data?.transactions?.payments?.[0]?.status_detail;
+    if (paymentDetail) return String(paymentDetail);
+
+    return fallback;
+  }
+
+  private mapMercadoPagoError(message: string, context?: 'spei' | 'card'): string {
+    const rules: Array<[RegExp, string]> = [
+      [/processing_error/i,
+        context === 'spei'
+          ? 'Mercado Pago no pudo generar una CLABE nueva (processing_error). ' +
+            'Tu integración está correcta; el fallo es del procesador SPEI de MP. ' +
+            'Si ya tienes una transferencia pendiente, reutilízala. ' +
+            'Si persiste, contacta soporte MP (developers) con el x-request-id del log del servidor ' +
+            'y verifica que la cuenta vendedor tenga SPEI/transferencias habilitado.'
+          : 'Error de procesamiento en Mercado Pago. Intenta de nuevo en unos minutos.'],
+      [/payer email forbidden/i,
+        context === 'spei'
+          ? 'Email de comprador no válido para SPEI. Usa el @testuser.com del COMPRADOR de prueba ' +
+            'de la misma app que MP_ACCESS_TOKEN (developers → Cuentas de prueba). ' +
+            'SPEI usa Orders API con credenciales APP_USR, no TEST-.'
+          : 'Email del comprador no permitido. En sandbox usa @testuser.com del comprador de prueba; en producción usa un email real.'],
+      [/invalid_credentials|test credentials are not supported/i,
+        'SPEI requiere Orders API con MP_ACCESS_TOKEN (APP_USR). Las credenciales TEST- no funcionan en /v1/orders.'],
+      [/live credentials.*test/i,
+        'Credenciales de producción con usuario de prueba. Usa APP_USR en prod o TEST- en sandbox, en frontend y backend.'],
+    ];
+    return rules.find(([re]) => re.test(message))?.[1] ?? message;
   }
 
   async createPayment(dto: CreatePaymentDto) {
     const amount = dto.transaction_amount.toFixed(2);
+    const payerEmail = this.resolveCardPayerEmail(dto.payer.email);
 
     // Codifica clientId + order reference — solo caracteres permitidos por MP
     const ordRef     = dto.external_reference ?? `${Date.now()}`;
@@ -48,7 +342,7 @@ export class PaymentsService {
           description: dto.description ?? 'Pago en línea',
           external_reference: externalRef,
           payer: {
-            email: dto.payer.email,
+            email: payerEmail,
             ...(dto.payer.identification?.type && dto.payer.identification?.number && {
               identification: dto.payer.identification,
             }),
@@ -118,10 +412,9 @@ export class PaymentsService {
         throw new HttpException(result, HttpStatus.BAD_REQUEST);
       }
 
-      this.logger.error('Error al crear orden de pago — sin datos recuperables', error?.message ?? error);
-      throw new BadRequestException(
-        cause?.message ?? cause?.[0]?.description ?? 'No se pudo procesar el pago',
-      );
+      const rawMessage = this.extractMpErrorMessage(error, 'No se pudo procesar el pago');
+      this.logger.error('Error al crear orden de pago — sin datos recuperables', rawMessage);
+      throw new BadRequestException(this.mapMercadoPagoError(String(rawMessage), 'card'));
     }
   }
 
@@ -131,67 +424,154 @@ export class PaymentsService {
       ? `c_${dto.client_id}__o_${ordRef}`
       : `o_${ordRef}`;
 
-    // Vigencia: 3 días desde ahora
-    const expirationDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    const amount     = dto.transaction_amount.toFixed(2);
+    const payerEmail = this.resolveSpeiPayerEmail(dto.payer.email);
+    const { clientId } = this.parseExternalRef(externalRef);
+    const clientIdNum  = clientId ? Number(clientId) : null;
+
+    this.logger.log(`SPEI → Orders API | payer.email: ${payerEmail}`);
+
+    const existing = await this.findReusablePendingSpei(externalRef, dto.transaction_amount, clientIdNum);
+    if (existing) {
+      this.logger.log(`SPEI → reutilizando orden pendiente ${existing.order_id}`);
+      const result = this.buildSpeiResponse(existing, clientId ?? null, dto, true);
+      await this.persistSpeiResult(existing, clientId ?? null, dto);
+      await this.forwardToServiaAPI(result);
+      return result;
+    }
+
+    const orderBody = {
+      type: 'online',
+      processing_mode: 'automatic',
+      marketplace: 'NONE',
+      total_amount: amount,
+      external_reference: externalRef,
+      payer: {
+        email: payerEmail,
+        first_name: 'Comprador',
+      },
+      transactions: {
+        payments: [{
+          amount,
+          payment_method: {
+            id: 'clabe',
+            type: 'bank_transfer',
+          },
+        }],
+      },
+    };
 
     try {
-      const response = await this.payment.create({
-        body: {
-          transaction_amount: dto.transaction_amount,
-          description:        dto.description ?? 'Pago SPEI — Servia',
-          payment_method_id:  'clabe',
-          payer: { email: dto.payer.email },
-          date_of_expiration: expirationDate,
-          external_reference: externalRef,
-        } as any,
-        requestOptions: { idempotencyKey: uuidv4() },
-      });
+      const response = await this.createSpeiOrder(
+        orderBody,
+        `spei-${externalRef}-${amount}`,
+      );
 
-      const r             = response as any;
-      const { clientId }  = this.parseExternalRef(externalRef);
-      const td            = r.transaction_details ?? {};
-      const poi           = r.point_of_interaction?.transaction_data ?? {};
+      const r    = response as any;
+      const spei = await this.enrichSpeiFromPayment(this.extractSpeiData(r), r);
 
-      // MP puede devolver la CLABE en distintos campos según versión del SDK
-      const clabe = poi.bank_transfer_id ?? poi.financial_institution ?? td.financial_institution ?? null;
-      const banco = td.financial_institution ?? poi.financial_institution ?? 'STP';
+      this.logger.log(`SPEI creado: ${spei.order_id} | CLABE: ${spei.clabe} | Referencia: ${spei.referencia}`);
 
-      this.logger.log(`SPEI creado: ${r.id} | Estado: ${r.status} | CLABE: ${clabe}`);
-
-      const result = {
-        payment_id:         String(r.id),
-        status:             r.status,
-        status_detail:      r.status_detail,
-        clabe,
-        banco,
-        amount:             r.transaction_amount,
-        external_reference: r.external_reference,
-        date_of_expiration: r.date_of_expiration,
-        client_id:          clientId ?? null,
-        ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
-      };
-
-      await this.savePayment({
-        order_id:             String(r.id),
-        payment_id:           String(r.id),
-        status:               r.status ?? 'pending',
-        payment_status:       r.status ?? 'pending',
-        payment_status_detail: r.status_detail ?? '',
-        total_amount:         r.transaction_amount ?? 0,
-        external_reference:   r.external_reference ?? null,
-        client_id:            clientId ?? null,
-        id_history_balance:   dto.id_history_balance ?? null,
-      });
+      const result = this.buildSpeiResponse(spei, clientId ?? null, dto);
+      await this.persistSpeiResult(spei, clientId ?? null, dto);
       await this.forwardToServiaAPI(result);
 
       return result;
 
     } catch (error) {
-      const cause = error?.cause ?? error;
-      this.logger.error('Error al crear pago SPEI', error?.message ?? error);
-      throw new BadRequestException(
-        cause?.message ?? cause?.[0]?.description ?? 'No se pudo generar el pago SPEI',
+      if (this.isSpeiProcessingError(error)) {
+        const fallback = await this.findReusablePendingSpei(externalRef, dto.transaction_amount, clientIdNum);
+        if (fallback) {
+          this.logger.warn(`SPEI processing_error — devolviendo orden pendiente ${fallback.order_id}`);
+          const result = this.buildSpeiResponse(fallback, clientId ?? null, dto, true);
+          await this.persistSpeiResult(fallback, clientId ?? null, dto);
+          await this.forwardToServiaAPI(result);
+          return result;
+        }
+      }
+
+      const rawMessage = this.extractMpErrorMessage(error, 'No se pudo generar el pago SPEI');
+      this.logger.error(
+        `Error al crear pago SPEI (payer: ${payerEmail})`,
+        rawMessage,
+        JSON.stringify(error?.cause ?? error),
       );
+      throw new BadRequestException(this.mapMercadoPagoError(String(rawMessage), 'spei'));
+    }
+  }
+
+  async handleSpeiWebhook(body: any) {
+    const resourceId = body.data?.id;
+    if (!resourceId) return { received: true };
+
+    this.logger.log(`Webhook SPEI recibido — id: ${resourceId}`);
+
+    try {
+      const raw            = await this.fetchSpeiResource(String(resourceId)) as any;
+      const { clientId }   = this.parseExternalRef(raw.external_reference ?? '');
+      const spei           = await this.enrichSpeiFromPayment(this.extractSpeiData(raw), raw);
+
+      const payload = {
+        order_id:           spei.order_id,
+        payment_id:         spei.payment_id,
+        status:             spei.status,
+        status_detail:      spei.status_detail,
+        clabe:              spei.clabe,
+        referencia:         spei.referencia,
+        banco:              spei.banco,
+        amount:             spei.amount,
+        currency:           spei.currency,
+        external_reference: spei.external_reference,
+        date_approved:      spei.date_approved,
+        client_id:          clientId ?? null,
+      };
+
+      await this.savePayment({
+        order_id:             spei.order_id,
+        payment_id:           spei.payment_id,
+        status:               spei.status ?? '',
+        payment_status:       spei.status ?? '',
+        payment_status_detail: spei.status_detail ?? '',
+        total_amount:         spei.amount ?? 0,
+        external_reference:   spei.external_reference ?? null,
+        referencia:           spei.referencia ?? null,
+        client_id:            clientId ?? null,
+      });
+      await this.forwardToServiaAPI(payload);
+
+      return { received: true, ...payload };
+    } catch {
+      return { received: true };
+    }
+  }
+
+  async simulateSpeiPayment(id: string) {
+    // Usa exactamente el mismo flujo que el webhook real
+    this.logger.log(`🧪 Simulando webhook SPEI — id: ${id}`);
+    return this.handleSpeiWebhook({ data: { id } });
+  }
+
+  async getSpeiPayment(id: string) {
+    try {
+      const raw  = await this.fetchSpeiResource(id) as any;
+      const spei = await this.enrichSpeiFromPayment(this.extractSpeiData(raw), raw);
+      return {
+        order_id:           spei.order_id,
+        payment_id:         spei.payment_id,
+        status:             spei.status,
+        status_detail:      spei.status_detail,
+        clabe:              spei.clabe,
+        referencia:         spei.referencia,
+        banco:              spei.banco,
+        amount:             spei.amount,
+        external_reference: spei.external_reference,
+        date_of_expiration: spei.date_of_expiration,
+        date_approved:      spei.date_approved,
+        sandbox_url:        spei.sandbox_url,
+      };
+    } catch (error) {
+      this.logger.error(`Error al obtener pago SPEI ${id}`, error);
+      throw new NotFoundException(`Pago SPEI ${id} no encontrado`);
     }
   }
 
@@ -307,13 +687,14 @@ export class PaymentsService {
     payment_status_detail: string;
     total_amount: string | number;
     external_reference: string;
+    referencia?: string | null;
     client_id?: string | number | null;
     id_history_balance?: string | number | null;
   }) {
     try {
       await this.paymentRepo.upsert(
         {
-          orderId:            data.order_id,
+          orderId:             data.order_id,
           paymentId:           data.payment_id,
           status:              data.status,
           paymentStatus:       data.payment_status,
@@ -322,7 +703,12 @@ export class PaymentsService {
           externalReference:   data.external_reference ?? null,
           userId:              0,
           clientId:            data.client_id ? Number(data.client_id) : null,
-          idHistoryBalance:    data.id_history_balance ? Number(data.id_history_balance) : null,
+          ...(data.referencia !== undefined && {
+            referencia: data.referencia ?? null,
+          }),
+          ...(data.id_history_balance !== undefined && {
+            idHistoryBalance: data.id_history_balance ? Number(data.id_history_balance) : null,
+          }),
         },
         ['paymentId'],
       );

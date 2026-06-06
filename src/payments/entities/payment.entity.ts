@@ -39,6 +39,9 @@ export class Payment {
   @Column({ type: 'varchar', length: 255, nullable: true, name: 'ExternalReference' })
   externalReference: string | null;
 
+  @Column({ type: 'varchar', length: 45, nullable: true, name: 'Referencia' })
+  referencia: string | null;
+
   @Column({ type: 'bigint', unsigned: true, name: 'UserId' })
   userId: number;
 

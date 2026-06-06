@@ -676,8 +676,8 @@
             token,
             paymentMethodId: payment_method_id,
             paymentMethodType: payment_method_type,
-            cardholderEmail: email,
           } = cardForm.getCardFormData();
+          const email = document.getElementById('form-checkout__cardholderEmail').value.trim();
 
           try {
             if (!token) {

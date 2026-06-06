@@ -120,7 +120,8 @@
       <p>📋 <strong>Instrucciones:</strong></p>
       <p>1. Copia la CLABE y realiza una transferencia SPEI desde tu banco.</p>
       <p>2. El monto debe ser <strong>exacto</strong> al indicado arriba.</p>
-      <p>3. Recibirás confirmación una vez que el banco procese el pago (puede tardar minutos).</p>
+      <p>3. Si tu banco lo pide, usa la <strong>Referencia</strong> para identificar el pago.</p>
+      <p>4. Recibirás confirmación una vez que el banco procese el pago (puede tardar minutos).</p>
     </div>
   </div>
 
@@ -211,7 +212,7 @@
           ...(idHistoryBalance !== null && { id_history_balance: idHistoryBalance }),
         };
 
-        const response = await fetch('https://servia.mx/pagos/api/payments/spei', {
+        const response = await fetch('http://localhost:3003/api/payments/spei', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify(body),
@@ -245,7 +246,7 @@
       document.getElementById('detail-monto').textContent  =
         data.amount != null ? `$${parseFloat(data.amount).toFixed(2)} MXN` : '—';
       document.getElementById('detail-vigencia').textContent = formatDate(data.date_of_expiration);
-      document.getElementById('detail-ref').textContent    = data.external_reference ?? extRef;
+      document.getElementById('detail-ref').textContent    = data.referencia ?? '—';
 
       document.getElementById('clabe-card').style.display = 'block';
 
@@ -256,6 +257,7 @@
           status:             data.status,
           status_detail:      data.status_detail,
           clabe:              clabe,
+          referencia:         data.referencia,
           banco:              data.banco,
           amount:             data.amount,
           date_of_expiration: data.date_of_expiration,
