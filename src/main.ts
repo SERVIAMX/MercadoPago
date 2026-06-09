@@ -26,10 +26,13 @@ async function bootstrap() {
     .setTitle('Mercado Pago API')
     .setDescription('NestJS + Mercado Pago Checkout API (México)')
     .setVersion('1.0')
+    .addServer('https://servia.mx/pagos/api', 'Producción')
     .addTag('payments', 'Pagos con tarjeta y webhooks')
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  const document = SwaggerModule.createDocument(app, swaggerConfig, {
+    ignoreGlobalPrefix: true,
+  });
   SwaggerModule.setup('api/docs', app, document);
 
   const port = process.env.APP_PORT ?? 3000;
