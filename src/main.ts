@@ -26,7 +26,7 @@ async function bootstrap() {
     .setTitle('Mercado Pago API')
     .setDescription('NestJS + Mercado Pago Checkout API (México)')
     .setVersion('1.0')
-    .addServer('https://servia.mx/pagos/api', 'Producción')
+    .addServer('http://localhost:3003/api', 'Producción')
     .addTag('payments', 'Pagos con tarjeta y webhooks')
     .build();
 

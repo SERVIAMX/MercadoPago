@@ -391,8 +391,9 @@
         `Pagar $${parseFloat(amount).toFixed(2)} MXN`;
     }
 
-    // 1. Inicializar con tu PUBLIC KEY
-    const mp = new MercadoPago('APP_USR-ff429938-4c7a-47c1-b882-674d04234f1e', { locale: 'es-MX' });
+    // 1. Inicializar con tu PUBLIC KEY (DEBE ser del mismo app que el MP_ACCESS_TOKEN del backend)
+    //    App 4295506445410130 / cuenta 199035615
+    const mp = new MercadoPago('APP_USR-4d83bb13-3884-41d7-8b41-679d2826c57a', { locale: 'es-MX' });
     // 2. Montar el CardForm — MP inyecta iframes seguros en los divs declarados
     const FIELD_CONTAINER_ID = {
       cardNumber: 'form-checkout__cardNumber',

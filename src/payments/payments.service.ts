@@ -6,6 +6,7 @@ import MercadoPagoConfig, { Order, Payment, PaymentMethod } from 'mercadopago';
 import { v4 as uuidv4 } from 'uuid';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { CreateSpeiPaymentDto } from './dto/create-spei-payment.dto';
+import { CreatePointPaymentDto } from './dto/create-point-payment.dto';
 import { Payment as PaymentEntity } from './entities/payment.entity';
 
 @Injectable()
@@ -25,6 +26,15 @@ export class PaymentsService {
     @InjectRepository(PaymentEntity)
     private readonly paymentRepo: Repository<PaymentEntity>,
   ) {
+    const accessToken = this.configService.get<string>('MP_ACCESS_TOKEN') ?? '';
+    const publicKey   = this.configService.get<string>('MP_PUBLIC_KEY') ?? '';
+    this.logger.log(
+      `MP credenciales cargadas → ` +
+      `env: ${accessToken.startsWith('TEST-') ? '🧪 SANDBOX' : '✅ PROD'} | ` +
+      `AccessToken app: ${accessToken.split('-')[1]} / cuenta: ${accessToken.split('-').pop()} | ` +
+      `PublicKey: ${publicKey.slice(0, 14)}...`,
+    );
+
     this.mpClient = new MercadoPagoConfig({
       accessToken: this.configService.get<string>('MP_ACCESS_TOKEN'),
       options: { timeout: 10000 },
@@ -675,6 +685,249 @@ export class PaymentsService {
 
       return { received: true, ...payload };
     } catch {
+      return { received: true };
+    }
+  }
+
+  // ───────────────────────────── POINT SMART ─────────────────────────────
+  // Point Smart NO usa Orders/Payments API directo: usa la Point Integration API.
+  // Flujo: 1) creas una "intención de pago" en la terminal  2) el cliente paga
+  // físicamente  3) MP avisa por webhook (point_integration_wh) con el payment_id real.
+
+  /** Llamada cruda a la Point Integration API (el SDK v2 no la cubre). */
+  private async pointRequest<T = any>(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<T> {
+    const accessToken = this.configService.get<string>('MP_ACCESS_TOKEN') ?? '';
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${accessToken}`,
+    };
+    if (body) headers['Content-Type'] = 'application/json';
+    // Point exige idempotencia en los POST de intención de pago
+    if (method === 'POST') headers['X-Idempotency-Key'] = uuidv4();
+
+    const res = await fetch(`https://api.mercadopago.com${path}`, {
+      method,
+      headers,
+      ...(body && { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+
+    if (!res.ok) {
+      const msg = data?.message ?? data?.error ?? `Point API ${res.status}`;
+      this.logger.error(`Point API ${method} ${path} → ${res.status}: ${text}`);
+      throw new BadRequestException(`Mercado Pago Point: ${msg}`);
+    }
+    return data as T;
+  }
+
+  /** Lista las terminales Point asociadas a la cuenta (necesitas el id para cobrar). */
+  async listPointDevices() {
+    const data = await this.pointRequest('GET', '/point/integration-api/devices');
+    return (data?.devices ?? []).map((d: any) => ({
+      id:              d.id,
+      pos_id:          d.pos_id,
+      store_id:        d.store_id,
+      external_pos_id: d.external_pos_id,
+      operating_mode:  d.operating_mode,
+    }));
+  }
+
+  /** Cambia el modo: PDV (integrado, cobra por API) o STANDALONE (manual). */
+  async setPointDeviceMode(deviceId: string, mode: 'PDV' | 'STANDALONE') {
+    const data = await this.pointRequest(
+      'PATCH',
+      `/point/integration-api/devices/${deviceId}`,
+      { operating_mode: mode },
+    );
+    this.logger.log(`Point device ${deviceId} → modo ${mode}`);
+    return { device_id: deviceId, operating_mode: data?.operating_mode ?? mode };
+  }
+
+  /** Crea la intención de pago: la terminal "despierta" y pide la tarjeta. */
+  async createPointPayment(dto: CreatePointPaymentDto) {
+    const deviceId =
+      dto.device_id ?? this.configService.get<string>('MP_POINT_DEVICE_ID');
+    if (!deviceId) {
+      throw new BadRequestException(
+        'Falta device_id. Configura MP_POINT_DEVICE_ID o envíalo en la petición.',
+      );
+    }
+
+    const ordRef      = dto.external_reference ?? `${Date.now()}`;
+    const externalRef = dto.client_id
+      ? `c_${dto.client_id}__o_${ordRef}`
+      : `o_${ordRef}`;
+
+    // Point recibe el monto en CENTAVOS (entero), no en decimales.
+    const amountCents = Math.round(dto.transaction_amount * 100);
+
+    const body: Record<string, unknown> = {
+      amount: amountCents,
+      additional_info: {
+        external_reference: externalRef,
+        print_on_terminal: dto.print_on_terminal ?? true,
+      },
+    };
+    if (dto.description) body.description = dto.description;
+    if (dto.installments && dto.installments > 1) {
+      body.payment = { installments: dto.installments, type: 'credit_card' };
+    }
+
+    const intent = await this.pointRequest(
+      'POST',
+      `/point/integration-api/devices/${deviceId}/payment-intents`,
+      body,
+    );
+
+    const { clientId } = this.parseExternalRef(externalRef);
+    this.logger.log(
+      `Point intent creada: ${intent.id} | device: ${deviceId} | estado: ${intent.state}`,
+    );
+
+    const result = {
+      payment_intent_id:  intent.id,
+      device_id:          deviceId,
+      state:              intent.state,
+      amount:             dto.transaction_amount,
+      external_reference: externalRef,
+      client_id:          clientId ?? null,
+      ...(dto.id_history_balance && { id_history_balance: dto.id_history_balance }),
+    };
+
+    // Guarda la intención como pendiente; el pago real llega por webhook.
+    await this.savePayment({
+      order_id:              String(intent.id),
+      payment_id:            String(intent.id),
+      status:                intent.state ?? 'OPEN',
+      payment_status:        'pending',
+      payment_status_detail: 'point_intent_created',
+      total_amount:          dto.transaction_amount,
+      external_reference:    externalRef,
+      client_id:             clientId ?? null,
+      id_history_balance:    dto.id_history_balance ?? null,
+    });
+
+    return result;
+  }
+
+  /** Consulta el estado de una intención de pago Point. */
+  async getPointPaymentIntent(id: string) {
+    const intent = await this.pointRequest(
+      'GET',
+      `/point/integration-api/payment-intents/${id}`,
+    );
+    return {
+      payment_intent_id:  intent.id,
+      device_id:          intent.device_id,
+      state:              intent.state,
+      amount:             intent.amount != null ? Number(intent.amount) / 100 : null,
+      payment_id:         intent.payment?.id ?? null,
+      external_reference: intent.additional_info?.external_reference ?? null,
+    };
+  }
+
+  /** Cancela una intención de pago aún no cobrada (libera la terminal). */
+  async cancelPointPaymentIntent(deviceId: string, intentId: string) {
+    await this.pointRequest(
+      'DELETE',
+      `/point/integration-api/devices/${deviceId}/payment-intents/${intentId}`,
+    );
+    this.logger.log(`Point intent cancelada: ${intentId} | device: ${deviceId}`);
+    return { canceled: true, payment_intent_id: intentId, device_id: deviceId };
+  }
+
+  /** Webhook de Point: cuando la intención termina (FINISHED) trae el pago real. */
+  async handlePointWebhook(body: any) {
+    const intentId = body?.data?.id ?? body?.id ?? body?.payment_intent_id;
+    if (!intentId) return { received: true };
+
+    this.logger.log(`Webhook Point recibido — intent: ${intentId}`);
+
+    try {
+      const intent = await this.pointRequest(
+        'GET',
+        `/point/integration-api/payment-intents/${intentId}`,
+      ) as any;
+
+      const externalReference = intent.additional_info?.external_reference ?? null;
+      const { clientId } = this.parseExternalRef(externalReference ?? '');
+      const paymentId = intent.payment?.id;
+
+      // La intención terminó con un pago real → trae el Payment definitivo.
+      if (intent.state === 'FINISHED' && paymentId) {
+        const paymentInfo = await this.payment.get({ id: String(paymentId) }) as any;
+
+        const payload = {
+          payment_intent_id:  String(intent.id),
+          payment_id:         String(paymentInfo.id),
+          device_id:          intent.device_id,
+          state:              intent.state,
+          status:             paymentInfo.status,
+          status_detail:      paymentInfo.status_detail,
+          amount:             paymentInfo.transaction_amount,
+          currency:           paymentInfo.currency_id,
+          date_approved:      paymentInfo.date_approved,
+          external_reference: externalReference,
+          client_id:          clientId ?? null,
+        };
+
+        await this.savePayment({
+          order_id:              String(intent.id),
+          payment_id:            String(paymentInfo.id),
+          status:                intent.state,
+          payment_status:        paymentInfo.status,
+          payment_status_detail: paymentInfo.status_detail ?? '',
+          total_amount:          paymentInfo.transaction_amount ?? 0,
+          external_reference:    externalReference,
+          client_id:             clientId ?? null,
+        });
+        await this.forwardToServiaAPI(payload);
+
+        this.logger.log(
+          `Point ✅ Pago confirmado — payment_id: ${paymentInfo.id} | status: ${paymentInfo.status}`,
+        );
+        return { received: true, ...payload };
+      }
+
+      // Estados intermedios (ON_TERMINAL, PROCESSING) o CANCELED/ERROR.
+      const state = String(intent.state ?? '');
+      const payload = {
+        payment_intent_id:  String(intent.id),
+        device_id:          intent.device_id,
+        state,
+        amount:             intent.amount != null ? Number(intent.amount) / 100 : null,
+        external_reference: externalReference,
+        client_id:          clientId ?? null,
+      };
+
+      await this.savePayment({
+        order_id:              String(intent.id),
+        payment_id:            String(intent.id),
+        status:                state,
+        payment_status:        ['CANCELED', 'ERROR', 'ABANDONED'].includes(state)
+          ? 'cancelled'
+          : 'pending',
+        payment_status_detail: `point_${state.toLowerCase()}`,
+        total_amount:          intent.amount != null ? Number(intent.amount) / 100 : 0,
+        external_reference:    externalReference,
+        client_id:             clientId ?? null,
+      });
+      await this.forwardToServiaAPI(payload);
+
+      return { received: true, ...payload };
+    } catch (error) {
+      this.logger.error(`Error procesando webhook Point ${intentId}`, error);
       return { received: true };
     }
   }
