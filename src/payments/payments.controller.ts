@@ -23,7 +23,6 @@ import {
   CreatePointPaymentDto,
   SetPointModeDto,
 } from './dto/create-point-payment.dto';
-import { WebhookPaymentDto } from './dto/webhook-payment.dto';
 
 @ApiTags('payments')
 @Controller('payments')
@@ -125,11 +124,13 @@ export class PaymentsController {
   @Post('webhook')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Webhook de notificaciones de Mercado Pago (tarjetas — API Orders)',
-    description: 'Configurar en la app Orders del panel de MP',
+    summary: 'Webhook UNIFICADO de Mercado Pago (tarjetas + SPEI — API Orders)',
+    description: 'Configurar con el evento "Pagos" en el panel de MP. Acepta el payload tal cual lo envía MP.',
   })
   @ApiOkResponse({ description: 'Notificación procesada' })
-  webhook(@Body() body: WebhookPaymentDto) {
+  webhook(@Body() body: any) {
+    // Sin DTO estricto: MP envía campos extra (api_version, live_mode, etc.)
+    // que el ValidationPipe global rechazaría con 400.
     return this.paymentsService.handleWebhook(body);
   }
 

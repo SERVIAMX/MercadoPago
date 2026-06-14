@@ -641,17 +641,30 @@ export class PaymentsService {
         ...(data.clabe && { clabe: data.clabe, referencia: data.referencia, banco: data.banco }),
       };
 
-      await this.savePayment({
-        order_id:              data.order_id ?? orderId ?? String(resourceId),
-        payment_id:            data.payment_id,
-        status:                data.status ?? '',
-        payment_status:        data.status ?? '',
-        payment_status_detail: data.status_detail ?? '',
-        total_amount:          data.amount ?? 0,
-        external_reference:    data.external_reference ?? null,
-        referencia:            data.referencia ?? null,
-        client_id:             clientId ?? null,
+      // MP entrega el id numérico del pago (sin link a la orden), distinto del
+      // id Orders (PAY...) que guardamos al crear. Para no duplicar, primero
+      // intentamos CONCILIAR el registro existente por external_reference + monto.
+      const reconciled = await this.reconcileExistingPayment({
+        externalReference: data.external_reference ?? null,
+        amount:            Number(data.amount ?? 0),
+        status:            data.status ?? '',
+        statusDetail:      data.status_detail ?? '',
+        referencia:        data.referencia ?? null,
       });
+
+      if (!reconciled) {
+        await this.savePayment({
+          order_id:              data.order_id ?? orderId ?? String(resourceId),
+          payment_id:            data.payment_id,
+          status:                data.status ?? '',
+          payment_status:        data.status ?? '',
+          payment_status_detail: data.status_detail ?? '',
+          total_amount:          data.amount ?? 0,
+          external_reference:    data.external_reference ?? null,
+          referencia:            data.referencia ?? null,
+          client_id:             clientId ?? null,
+        });
+      }
       await this.forwardToServiaAPI(payload);
 
       this.logger.log(`Webhook ✅ procesado — pago ${data.payment_id} | status: ${data.status}`);
@@ -933,6 +946,48 @@ export class PaymentsService {
       this.logger.error(`Error procesando webhook Point ${intentId}`, error);
       return { received: true };
     }
+  }
+
+  /**
+   * Actualiza un registro existente (pendiente) que coincida por external_reference + monto,
+   * preservando su OrderId/PaymentId originales. Evita duplicados por el doble id de MP.
+   * Devuelve true si concilió un registro; false si no encontró ninguno.
+   */
+  private async reconcileExistingPayment(p: {
+    externalReference: string | null;
+    amount: number;
+    status: string;
+    statusDetail: string;
+    referencia: string | null;
+  }): Promise<boolean> {
+    if (!p.externalReference) return false;
+
+    const rows = await this.paymentRepo.find({
+      where: { externalReference: p.externalReference },
+      order: { fhRegistro: 'DESC' },
+      take: 20,
+    });
+    if (rows.length === 0) return false;
+
+    const amountMatches = (r: PaymentEntity) =>
+      Math.abs(Number(r.totalAmount) - p.amount) < 0.009;
+
+    // Prefiere el pendiente con monto exacto; si no, cualquiera con monto exacto.
+    const target =
+      rows.find((r) => amountMatches(r) && this.speiPendingStatuses.includes(r.paymentStatus)) ??
+      rows.find((r) => amountMatches(r));
+    if (!target) return false;
+
+    target.status              = p.status;
+    target.paymentStatus       = p.status;
+    target.paymentStatusDetail = p.statusDetail;
+    if (p.referencia) target.referencia = p.referencia;
+
+    await this.paymentRepo.save(target);
+    this.logger.log(
+      `DB ✅ Conciliado #${target.id} (${target.orderId}) → ${p.status} (${p.statusDetail})`,
+    );
+    return true;
   }
 
   private async savePayment(data: {
