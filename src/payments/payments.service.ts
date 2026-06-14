@@ -665,10 +665,28 @@ export class PaymentsService {
           client_id:             clientId ?? null,
         });
       }
-      await this.forwardToServiaAPI(payload);
+
+      // Forward a Servia con el MISMO formato que el pago con tarjeta (createPayment),
+      // para que Servia lo procese idéntico: con id_history_balance cubre saldo
+      // pendiente; sin él, asigna saldo nuevo. client_id e id_history_balance se
+      // toman del registro original (MP no los devuelve en el webhook).
+      const forwardPayload = {
+        order_id:              reconciled?.orderId ?? data.order_id ?? orderId ?? null,
+        payment_id:            data.payment_id,
+        status:                data.status,
+        payment_status:        data.status,
+        payment_status_detail: data.status_detail,
+        total_amount:          data.amount,
+        external_reference:    data.external_reference ?? null,
+        client_id:             reconciled?.clientId ?? clientId ?? null,
+        ...(reconciled?.idHistoryBalance != null && {
+          id_history_balance: reconciled.idHistoryBalance,
+        }),
+      };
+      await this.forwardToServiaAPI(forwardPayload);
 
       this.logger.log(`Webhook ✅ procesado — pago ${data.payment_id} | status: ${data.status}`);
-      return { received: true, ...payload };
+      return { received: true, ...forwardPayload };
 
     } catch (error) {
       const httpStatus = error?.status ?? error?.cause?.status;
@@ -959,15 +977,15 @@ export class PaymentsService {
     status: string;
     statusDetail: string;
     referencia: string | null;
-  }): Promise<boolean> {
-    if (!p.externalReference) return false;
+  }): Promise<PaymentEntity | null> {
+    if (!p.externalReference) return null;
 
     const rows = await this.paymentRepo.find({
       where: { externalReference: p.externalReference },
       order: { fhRegistro: 'DESC' },
       take: 20,
     });
-    if (rows.length === 0) return false;
+    if (rows.length === 0) return null;
 
     const amountMatches = (r: PaymentEntity) =>
       Math.abs(Number(r.totalAmount) - p.amount) < 0.009;
@@ -976,7 +994,7 @@ export class PaymentsService {
     const target =
       rows.find((r) => amountMatches(r) && this.speiPendingStatuses.includes(r.paymentStatus)) ??
       rows.find((r) => amountMatches(r));
-    if (!target) return false;
+    if (!target) return null;
 
     target.status              = p.status;
     target.paymentStatus       = p.status;
@@ -987,7 +1005,7 @@ export class PaymentsService {
     this.logger.log(
       `DB ✅ Conciliado #${target.id} (${target.orderId}) → ${p.status} (${p.statusDetail})`,
     );
-    return true;
+    return target;
   }
 
   private async savePayment(data: {
