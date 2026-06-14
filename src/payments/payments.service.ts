@@ -666,15 +666,18 @@ export class PaymentsService {
         });
       }
 
-      // Forward a Servia con el MISMO formato que el pago con tarjeta (createPayment),
-      // para que Servia lo procese idéntico: con id_history_balance cubre saldo
-      // pendiente; sin él, asigna saldo nuevo. client_id e id_history_balance se
-      // toman del registro original (MP no los devuelve en el webhook).
+      // Servia acredita SOLO si status==='processed' && payment_status_detail==='accredited'
+      // (formato Orders/tarjeta). El webhook SPEI resuelve el pago vía /v1/payments y llega
+      // como 'approved'; lo normalizamos a 'processed' cuando está acreditado para que Servia
+      // lo abone igual que una tarjeta. Con id_history_balance cubre saldo pendiente; sin él, asigna nuevo.
+      const isAccredited = String(data.status_detail ?? '').toLowerCase() === 'accredited';
+      const serviaStatus = isAccredited ? 'processed' : (data.status ?? '');
+
       const forwardPayload = {
         order_id:              reconciled?.orderId ?? data.order_id ?? orderId ?? null,
         payment_id:            data.payment_id,
-        status:                data.status,
-        payment_status:        data.status,
+        status:                serviaStatus,
+        payment_status:        serviaStatus,
         payment_status_detail: data.status_detail,
         total_amount:          data.amount,
         external_reference:    data.external_reference ?? null,
