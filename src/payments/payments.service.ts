@@ -510,49 +510,9 @@ export class PaymentsService {
     }
   }
 
+  /** SPEI delega en el handler unificado (compatibilidad con /payments/webhook-spei). */
   async handleSpeiWebhook(body: any) {
-    const resourceId = body.data?.id;
-    if (!resourceId) return { received: true };
-
-    this.logger.log(`Webhook SPEI recibido — id: ${resourceId}`);
-
-    try {
-      const raw            = await this.fetchSpeiResource(String(resourceId)) as any;
-      const { clientId }   = this.parseExternalRef(raw.external_reference ?? '');
-      const spei           = await this.enrichSpeiFromPayment(this.extractSpeiData(raw), raw);
-
-      const payload = {
-        order_id:           spei.order_id,
-        payment_id:         spei.payment_id,
-        status:             spei.status,
-        status_detail:      spei.status_detail,
-        clabe:              spei.clabe,
-        referencia:         spei.referencia,
-        banco:              spei.banco,
-        amount:             spei.amount,
-        currency:           spei.currency,
-        external_reference: spei.external_reference,
-        date_approved:      spei.date_approved,
-        client_id:          clientId ?? null,
-      };
-
-      await this.savePayment({
-        order_id:             spei.order_id,
-        payment_id:           spei.payment_id,
-        status:               spei.status ?? '',
-        payment_status:       spei.status ?? '',
-        payment_status_detail: spei.status_detail ?? '',
-        total_amount:         spei.amount ?? 0,
-        external_reference:   spei.external_reference ?? null,
-        referencia:           spei.referencia ?? null,
-        client_id:            clientId ?? null,
-      });
-      await this.forwardToServiaAPI(payload);
-
-      return { received: true, ...payload };
-    } catch {
-      return { received: true };
-    }
+    return this.handleWebhook(body);
   }
 
   async simulateSpeiPayment(id: string) {
@@ -645,48 +605,91 @@ export class PaymentsService {
     return { clientId: match?.[1], orderId: match?.[2] };
   }
 
+  /**
+   * Webhook UNIFICADO — procesa notificaciones de tarjetas y SPEI (Orders API),
+   * sin importar si MP envía un id de orden (ORD...) o de pago (numérico/PAY...).
+   * Tanto /payments/webhook como /payments/webhook-spei entran aquí.
+   */
   async handleWebhook(body: any) {
-    const type       = body.type;
-    const resourceId = body.data?.id;
-
+    const type       = body?.type ?? body?.topic ?? body?.action;
+    const resourceId = body?.data?.id ?? body?.id ?? body?.resource;
     if (!resourceId) return { received: true };
 
-    this.logger.log(`Webhook recibido — tipo: ${type} | id: ${resourceId}`);
+    this.logger.log(`Webhook recibido — tipo: ${type ?? 'N/A'} | id: ${resourceId}`);
 
     try {
-      const paymentInfo              = await this.payment.get({ id: resourceId });
-      const { clientId, orderId }    = this.parseExternalRef(paymentInfo.external_reference ?? '');
+      const raw  = await this.resolveNotificationSource(String(resourceId));
+      const data = await this.enrichSpeiFromPayment(this.extractSpeiData(raw), raw);
+      const { clientId, orderId } = this.parseExternalRef(data.external_reference ?? '');
 
-      this.logger.log(`Webhook — cliente: ${clientId ?? 'N/A'} | orden: ${orderId ?? 'N/A'} | estado: ${paymentInfo.status}`);
+      this.logger.log(
+        `Webhook — cliente: ${clientId ?? 'N/A'} | orden: ${data.order_id ?? orderId ?? 'N/A'} | ` +
+        `pago: ${data.payment_id} | estado: ${data.status} (${data.status_detail})`,
+      );
 
       const payload = {
-        payment_id:         String(paymentInfo.id),
-        status:             paymentInfo.status,
-        status_detail:      paymentInfo.status_detail,
+        order_id:           data.order_id ?? orderId ?? null,
+        payment_id:         data.payment_id,
+        status:             data.status,
+        status_detail:      data.status_detail,
+        amount:             data.amount,
+        currency:           data.currency,
+        external_reference: data.external_reference ?? null,
+        date_approved:      data.date_approved,
         client_id:          clientId ?? null,
-        order_id:           orderId  ?? null,
-        amount:             paymentInfo.transaction_amount,
-        currency:           paymentInfo.currency_id,
-        date_approved:      paymentInfo.date_approved,
-        external_reference: paymentInfo.external_reference,
+        // Campos SPEI (ausentes en tarjetas)
+        ...(data.clabe && { clabe: data.clabe, referencia: data.referencia, banco: data.banco }),
       };
 
       await this.savePayment({
-        order_id:             orderId ?? resourceId,
-        payment_id:           String(paymentInfo.id),
-        status:               paymentInfo.status,
-        payment_status:       paymentInfo.status,
-        payment_status_detail: paymentInfo.status_detail ?? '',
-        total_amount:         paymentInfo.transaction_amount ?? 0,
-        external_reference:   paymentInfo.external_reference ?? null,
-        client_id:            clientId ?? null,
+        order_id:              data.order_id ?? orderId ?? String(resourceId),
+        payment_id:            data.payment_id,
+        status:                data.status ?? '',
+        payment_status:        data.status ?? '',
+        payment_status_detail: data.status_detail ?? '',
+        total_amount:          data.amount ?? 0,
+        external_reference:    data.external_reference ?? null,
+        referencia:            data.referencia ?? null,
+        client_id:             clientId ?? null,
       });
       await this.forwardToServiaAPI(payload);
 
+      this.logger.log(`Webhook ✅ procesado — pago ${data.payment_id} | status: ${data.status}`);
       return { received: true, ...payload };
-    } catch {
-      return { received: true };
+
+    } catch (error) {
+      const httpStatus = error?.status ?? error?.cause?.status;
+      this.logger.error(
+        `Error procesando webhook (id: ${resourceId})`,
+        this.extractMpErrorMessage(error, String(error)),
+      );
+      // 404 = recurso ajeno/inexistente → no tiene caso reintentar.
+      if (httpStatus === 404) return { received: true };
+      // Otros fallos (transitorios) → 5xx para que Mercado Pago REINTENTE (no silenciar con 200).
+      throw new HttpException(
+        { received: false, error: 'webhook_processing_failed' },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
+  }
+
+  /** Resuelve el recurso de una notificación a su ORDEN (preferido) o pago. */
+  private async resolveNotificationSource(resourceId: string): Promise<any> {
+    const id = String(resourceId);
+    if (id.startsWith('ORD')) {
+      return this.order.get({ id } as any);
+    }
+    // id de pago (numérico o PAY...): trae el pago y, si referencia una orden, sube a ella
+    const payment = await this.payment.get({ id }) as any;
+    const linkedOrderId = payment?.order?.id;
+    if (linkedOrderId && String(linkedOrderId).startsWith('ORD')) {
+      try {
+        return await this.order.get({ id: String(linkedOrderId) } as any);
+      } catch {
+        return payment;
+      }
+    }
+    return payment;
   }
 
   // ───────────────────────────── POINT SMART ─────────────────────────────
