@@ -327,15 +327,62 @@ export class PaymentsService {
           : 'Email del comprador no permitido. En sandbox usa @testuser.com del comprador de prueba; en producción usa un email real.'],
       [/invalid_credentials|test credentials are not supported/i,
         'SPEI requiere Orders API con MP_ACCESS_TOKEN (APP_USR). Las credenciales TEST- no funcionan en /v1/orders.'],
+      [/payment_method\.id|must be one of/i,
+        'Método de pago no válido para Orders API. Usa id: visa, master o amex y ' +
+        'payment_method_type: credit_card o debit_card (debmaster/debvisa se normalizan en el backend).'],
       [/live credentials.*test/i,
         'Credenciales de producción con usuario de prueba. Usa APP_USR en prod o TEST- en sandbox, en frontend y backend.'],
     ];
     return rules.find(([re]) => re.test(message))?.[1] ?? message;
   }
 
+  /** Orders API (MX): id = marca (visa/master/amex); el tipo va en payment_method.type. */
+  private normalizeCardPaymentMethod(
+    paymentMethodId: string,
+    paymentMethodType?: string,
+  ): { id: string; type: string } {
+    const rawId = paymentMethodId?.trim().toLowerCase();
+    if (!rawId) {
+      throw new BadRequestException('Falta payment_method_id.');
+    }
+
+    const debitPrefixMap: Record<string, string> = {
+      debvisa:  'visa',
+      debmaster: 'master',
+      debamex:  'amex',
+    };
+
+    if (debitPrefixMap[rawId]) {
+      return { id: debitPrefixMap[rawId], type: 'debit_card' };
+    }
+
+    const brandIds = new Set(['visa', 'master', 'amex']);
+    if (brandIds.has(rawId)) {
+      const type = paymentMethodType === 'debit_card' ? 'debit_card' : 'credit_card';
+      return { id: rawId, type };
+    }
+
+    // CardForm a veces manda "master"/"visa" con type debit_card aunque el id no traiga prefijo deb-
+    if (paymentMethodType === 'debit_card') {
+      const brand = rawId.replace(/^deb/, '');
+      if (brandIds.has(brand)) {
+        return { id: brand, type: 'debit_card' };
+      }
+    }
+
+    throw new BadRequestException(
+      `payment_method_id "${paymentMethodId}" no válido. Usa visa, master o amex ` +
+      '(con payment_method_type: debit_card para débito).',
+    );
+  }
+
   async createPayment(dto: CreatePaymentDto) {
     const amount = dto.transaction_amount.toFixed(2);
     const payerEmail = this.resolveCardPayerEmail(dto.payer.email);
+    const paymentMethod = this.normalizeCardPaymentMethod(
+      dto.payment_method_id,
+      dto.payment_method_type,
+    );
 
     // Codifica clientId + order reference — solo caracteres permitidos por MP
     const ordRef     = dto.external_reference ?? `${Date.now()}`;
@@ -361,8 +408,8 @@ export class PaymentsService {
             payments: [{
               amount,
               payment_method: {
-                id: dto.payment_method_id,
-                type: dto.payment_method_type ?? 'credit_card',
+                id: paymentMethod.id,
+                type: paymentMethod.type,
                 token: dto.token,
                 installments: dto.installments ?? 1,
                 statement_descriptor: 'SERVIA',

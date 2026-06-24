@@ -45,11 +45,14 @@ export class CreatePaymentDto {
   @IsString()
   token: string;
 
-  @ApiProperty({ example: 'visa', description: 'visa, master, amex, etc.' })
+  @ApiProperty({ example: 'visa', description: 'visa, master, amex (o debvisa, debmaster desde CardForm)' })
   @IsString()
   payment_method_id: string;
 
-  @ApiPropertyOptional({ example: 'credit_card', description: 'credit_card | debit_card' })
+  @ApiPropertyOptional({
+    example: 'credit_card',
+    description: 'credit_card | debit_card. Si envías debmaster/debvisa, el backend lo normaliza.',
+  })
   @IsOptional()
   @IsString()
   payment_method_type?: string;
