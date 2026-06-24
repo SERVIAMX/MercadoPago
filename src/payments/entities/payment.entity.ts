@@ -56,4 +56,7 @@ export class Payment {
 
   @Column({ type: 'bigint', nullable: true, name: 'IdHistoryBalance' })
   idHistoryBalance: number | null;
+
+  @Column({ type: 'tinyint', width: 1, default: 0, name: 'ServiaNotified' })
+  serviaNotified: boolean;
 }

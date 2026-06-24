@@ -142,6 +142,12 @@ export class PaymentsService {
 
   private readonly speiPendingStatuses = ['action_required', 'pending', 'processing'];
 
+  private isAccreditedStatus(status?: string, statusDetail?: string): boolean {
+    const s = String(status ?? '').toLowerCase();
+    const d = String(statusDetail ?? '').toLowerCase();
+    return d === 'accredited' || s === 'approved' || (s === 'processed' && d === 'accredited');
+  }
+
   private delay(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -441,7 +447,15 @@ export class PaymentsService {
       };
 
       await this.savePayment(result);
-      await this.forwardToServiaAPI(result);
+
+      const accredited = this.isAccreditedStatus(result.status, result.payment_status_detail);
+      if (!accredited) {
+        await this.forwardToServiaAPI(result);
+      } else {
+        this.logger.log(
+          `Pago acreditado en MP — forward diferido al webhook (order: ${result.order_id})`,
+        );
+      }
       return result;
 
     } catch (error) {
@@ -695,6 +709,7 @@ export class PaymentsService {
       // intentamos CONCILIAR el registro existente por external_reference + monto.
       const reconciled = await this.reconcileExistingPayment({
         externalReference: data.external_reference ?? null,
+        orderId:           data.order_id ?? orderId ?? null,
         amount:            Number(data.amount ?? 0),
         status:            data.status ?? '',
         statusDetail:      data.status_detail ?? '',
@@ -716,10 +731,7 @@ export class PaymentsService {
       }
 
       // Servia acredita SOLO si status==='processed' && payment_status_detail==='accredited'
-      // (formato Orders/tarjeta). El webhook SPEI resuelve el pago vía /v1/payments y llega
-      // como 'approved'; lo normalizamos a 'processed' cuando está acreditado para que Servia
-      // lo abone igual que una tarjeta. Con id_history_balance cubre saldo pendiente; sin él, asigna nuevo.
-      const isAccredited = String(data.status_detail ?? '').toLowerCase() === 'accredited';
+      const isAccredited = this.isAccreditedStatus(data.status, data.status_detail);
       const serviaStatus = isAccredited ? 'processed' : (data.status ?? '');
 
       const forwardPayload = {
@@ -735,7 +747,25 @@ export class PaymentsService {
           id_history_balance: reconciled.idHistoryBalance,
         }),
       };
-      await this.forwardToServiaAPI(forwardPayload);
+
+      const dbRow = reconciled ?? await this.findPaymentForServiaNotify({
+        externalReference: data.external_reference,
+        orderId:           forwardPayload.order_id,
+        paymentId:         data.payment_id,
+        amount:            Number(data.amount ?? 0),
+      });
+
+      if (dbRow?.serviaNotified) {
+        this.logger.warn(
+          `Webhook — skip forward Servia (ya notificado): pago ${data.payment_id}`,
+        );
+      } else {
+        await this.forwardToServiaAPI(forwardPayload);
+        if (dbRow) {
+          dbRow.serviaNotified = true;
+          await this.paymentRepo.save(dbRow);
+        }
+      }
 
       this.logger.log(`Webhook ✅ procesado — pago ${data.payment_id} | status: ${data.status}`);
       return { received: true, ...forwardPayload };
@@ -1025,24 +1055,35 @@ export class PaymentsService {
    */
   private async reconcileExistingPayment(p: {
     externalReference: string | null;
+    orderId?: string | null;
     amount: number;
     status: string;
     statusDetail: string;
     referencia: string | null;
   }): Promise<PaymentEntity | null> {
-    if (!p.externalReference) return null;
-
-    const rows = await this.paymentRepo.find({
-      where: { externalReference: p.externalReference },
-      order: { fhRegistro: 'DESC' },
-      take: 20,
-    });
-    if (rows.length === 0) return null;
-
     const amountMatches = (r: PaymentEntity) =>
       Math.abs(Number(r.totalAmount) - p.amount) < 0.009;
 
-    // Prefiere el pendiente con monto exacto; si no, cualquiera con monto exacto.
+    let rows: PaymentEntity[] = [];
+
+    if (p.externalReference) {
+      rows = await this.paymentRepo.find({
+        where: { externalReference: p.externalReference },
+        order: { fhRegistro: 'DESC' },
+        take: 20,
+      });
+    }
+
+    if (rows.length === 0 && p.orderId) {
+      rows = await this.paymentRepo.find({
+        where: { orderId: String(p.orderId) },
+        order: { fhRegistro: 'DESC' },
+        take: 5,
+      });
+    }
+
+    if (rows.length === 0) return null;
+
     const target =
       rows.find((r) => amountMatches(r) && this.speiPendingStatuses.includes(r.paymentStatus)) ??
       rows.find((r) => amountMatches(r));
@@ -1058,6 +1099,36 @@ export class PaymentsService {
       `DB ✅ Conciliado #${target.id} (${target.orderId}) → ${p.status} (${p.statusDetail})`,
     );
     return target;
+  }
+
+  private async findPaymentForServiaNotify(p: {
+    externalReference?: string | null;
+    orderId?: string | null;
+    paymentId?: string | null;
+    amount: number;
+  }): Promise<PaymentEntity | null> {
+    if (p.paymentId) {
+      const row = await this.paymentRepo.findOne({ where: { paymentId: String(p.paymentId) } });
+      if (row) return row;
+    }
+    if (p.orderId) {
+      const rows = await this.paymentRepo.find({
+        where: { orderId: String(p.orderId) },
+        order: { fhRegistro: 'DESC' },
+        take: 3,
+      });
+      const match = rows.find((r) => Math.abs(Number(r.totalAmount) - p.amount) < 0.009);
+      if (match) return match;
+    }
+    if (p.externalReference) {
+      const rows = await this.paymentRepo.find({
+        where: { externalReference: p.externalReference },
+        order: { fhRegistro: 'DESC' },
+        take: 5,
+      });
+      return rows.find((r) => Math.abs(Number(r.totalAmount) - p.amount) < 0.009) ?? null;
+    }
+    return null;
   }
 
   private async savePayment(data: {
