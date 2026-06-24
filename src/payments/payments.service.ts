@@ -328,15 +328,17 @@ export class PaymentsService {
       [/invalid_credentials|test credentials are not supported/i,
         'SPEI requiere Orders API con MP_ACCESS_TOKEN (APP_USR). Las credenciales TEST- no funcionan en /v1/orders.'],
       [/payment_method\.id|must be one of/i,
-        'Método de pago no válido para Orders API. Usa id: visa, master o amex y ' +
-        'payment_method_type: credit_card o debit_card (debmaster/debvisa se normalizan en el backend).'],
+        'Combinación inválida de tarjeta. Crédito: visa/master/amex + credit_card. ' +
+        'Débito: debvisa/debmaster + debit_card (el backend infiere debit_card si envías debvisa).'],
       [/live credentials.*test/i,
         'Credenciales de producción con usuario de prueba. Usa APP_USR en prod o TEST- en sandbox, en frontend y backend.'],
     ];
     return rules.find(([re]) => re.test(message))?.[1] ?? message;
   }
 
-  /** Orders API (MX): id = marca (visa/master/amex); el tipo va en payment_method.type. */
+  /**
+   * Orders API (cuenta MX): crédito usa visa/master/amex; débito usa debvisa/debmaster + debit_card.
+   */
   private normalizeCardPaymentMethod(
     paymentMethodId: string,
     paymentMethodType?: string,
@@ -346,33 +348,32 @@ export class PaymentsService {
       throw new BadRequestException('Falta payment_method_id.');
     }
 
-    const debitPrefixMap: Record<string, string> = {
-      debvisa:  'visa',
-      debmaster: 'master',
-      debamex:  'amex',
+    const debitIds = new Set(['debvisa', 'debmaster', 'debamex']);
+    const creditIds = new Set(['visa', 'master', 'amex']);
+    const brandToDebit: Record<string, string> = {
+      visa: 'debvisa',
+      master: 'debmaster',
+      amex: 'debamex',
     };
 
-    if (debitPrefixMap[rawId]) {
-      return { id: debitPrefixMap[rawId], type: 'debit_card' };
+    if (debitIds.has(rawId)) {
+      return { id: rawId, type: 'debit_card' };
     }
 
-    const brandIds = new Set(['visa', 'master', 'amex']);
-    if (brandIds.has(rawId)) {
-      const type = paymentMethodType === 'debit_card' ? 'debit_card' : 'credit_card';
-      return { id: rawId, type };
-    }
+    const isDebit =
+      paymentMethodType === 'debit_card' ||
+      paymentMethodType === 'debit';
 
-    // CardForm a veces manda "master"/"visa" con type debit_card aunque el id no traiga prefijo deb-
-    if (paymentMethodType === 'debit_card') {
-      const brand = rawId.replace(/^deb/, '');
-      if (brandIds.has(brand)) {
-        return { id: brand, type: 'debit_card' };
+    if (creditIds.has(rawId)) {
+      if (isDebit) {
+        return { id: brandToDebit[rawId], type: 'debit_card' };
       }
+      return { id: rawId, type: 'credit_card' };
     }
 
     throw new BadRequestException(
-      `payment_method_id "${paymentMethodId}" no válido. Usa visa, master o amex ` +
-      '(con payment_method_type: debit_card para débito).',
+      `payment_method_id "${paymentMethodId}" no válido. ` +
+      'Crédito: visa, master, amex. Débito: debvisa, debmaster (o visa/master con payment_method_type: debit_card).',
     );
   }
 
@@ -383,6 +384,7 @@ export class PaymentsService {
       dto.payment_method_id,
       dto.payment_method_type,
     );
+    this.logger.log(`Tarjeta → MP: id=${paymentMethod.id}, type=${paymentMethod.type}`);
 
     // Codifica clientId + order reference — solo caracteres permitidos por MP
     const ordRef     = dto.external_reference ?? `${Date.now()}`;
